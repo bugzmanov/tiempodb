@@ -88,6 +88,92 @@ impl Storage for MemoryStorage {
     }
 }
 
+impl Default for MemoryStorage {
+    fn default() -> Self {
+        MemoryStorage::new()
+    }
+}
+
+struct SnaphotableStorage {
+    snapshot: MemoryStorage,
+    active: MemoryStorage,
+}
+
+impl SnaphotableStorage {
+    fn new() -> Self {
+        SnaphotableStorage {
+            snapshot: MemoryStorage::new(),
+            active: MemoryStorage::new(),
+        }
+    }
+
+    fn make_snapshot(&mut self) {
+        let curr = std::mem::take(&mut self.active);
+        self.snapshot = curr;
+    }
+}
+
+impl Storage for SnaphotableStorage {
+    fn add(&mut self, point: DataPoint) {
+        self.active.add(point);
+    }
+
+    fn add_bulk(&mut self, points: &[DataPoint]) {
+        self.active.add_bulk(points);
+    }
+
+    fn load(&mut self, metric_name: &str) -> Vec<DataPoint> {
+        let snapshot_vec = self.snapshot.load(metric_name);
+        let active_vec = self.active.load(metric_name);
+        if snapshot_vec.is_empty() {
+            return active_vec;
+        }
+
+        if active_vec.is_empty() {
+            return snapshot_vec;
+        }
+
+        let mut result = Vec::with_capacity(snapshot_vec.len() + active_vec.len());
+
+        let mut left_iter = snapshot_vec.into_iter();
+        let mut right_iter = active_vec.into_iter();
+
+        let mut left = left_iter.next();
+        let mut right = right_iter.next();
+
+        while (left.is_some() || right.is_some()) {
+            match (&mut left, &mut right) {
+                (&mut None, &mut None) => {} //do nothing
+                (left_item @ &mut Some(_), right_item @ &mut None) => {
+                    result.push(left_item.take().expect("shuld not happen"))
+                }
+                (left_item @ &mut None, right_item @ &mut Some(_)) => {
+                    result.push(right_item.take().expect("should not hppen"))
+                }
+                (left_item @ &mut Some(_), right_item @ &mut Some(_)) => {
+                    if left_item.as_ref().expect("").timestamp
+                        > right_item.as_ref().expect("").timestamp
+                    {
+                        result.push(right_item.take().expect("shuld not happen"));
+                    } else {
+                        result.push(left_item.take().expect("shuld not happen"));
+                    }
+                }
+            }
+
+            if (left.is_none()) {
+                left = left_iter.next();
+            }
+
+            if (right.is_none()) {
+                right = right_iter.next();
+            }
+        }
+
+        result
+    }
+}
+
 fn main() {
     println!("Hello, world!");
 }
@@ -148,6 +234,33 @@ mod test {
         let result = storage.load(METRIC_NAME);
 
         assert_eq!(4, result.len());
+        assert_eq!(true, is_ordered_by_time(&result));
+    }
+
+    #[test]
+    fn snapshottable_should_return_ordered_from_both_sources() {
+        let mut storage = SnaphotableStorage::new();
+        let mut data_points = fake::vec![DataPoint; 4];
+        let metric: Rc<str> = Rc::from(METRIC_NAME);
+        for point in &mut data_points {
+            point.name = metric.clone();
+        }
+        storage.add_bulk(&data_points);
+        let mut second_batch = fake::vec![DataPoint; 3];
+        let metric: Rc<str> = Rc::from(METRIC_NAME);
+        for point in &mut second_batch {
+            point.name = metric.clone();
+        }
+
+        storage.make_snapshot();
+
+        storage.add_bulk(&second_batch);
+        assert_eq!(4, storage.snapshot.load(METRIC_NAME).len());
+        assert_eq!(3, storage.active.load(METRIC_NAME).len());
+
+        let result = storage.load(METRIC_NAME);
+
+        assert_eq!(7, result.len());
         assert_eq!(true, is_ordered_by_time(&result));
     }
 }
