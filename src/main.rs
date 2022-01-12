@@ -1,7 +1,9 @@
 use fake::{Dummy, Fake, Faker};
-use rand::{thread_rng, Rng};
+use rand::Rng;
 use std::collections::HashMap;
 use std::rc::Rc;
+
+mod protocol;
 
 struct FakeRc;
 
@@ -141,13 +143,13 @@ impl Storage for SnaphotableStorage {
         let mut left = left_iter.next();
         let mut right = right_iter.next();
 
-        while (left.is_some() || right.is_some()) {
+        while left.is_some() || right.is_some() {
             match (&mut left, &mut right) {
                 (&mut None, &mut None) => {} //do nothing
-                (left_item @ &mut Some(_), right_item @ &mut None) => {
+                (left_item @ &mut Some(_), _r @ &mut None) => {
                     result.push(left_item.take().expect("shuld not happen"))
                 }
-                (left_item @ &mut None, right_item @ &mut Some(_)) => {
+                (_l @ &mut None, right_item @ &mut Some(_)) => {
                     result.push(right_item.take().expect("should not hppen"))
                 }
                 (left_item @ &mut Some(_), right_item @ &mut Some(_)) => {
@@ -161,11 +163,11 @@ impl Storage for SnaphotableStorage {
                 }
             }
 
-            if (left.is_none()) {
+            if left.is_none() {
                 left = left_iter.next();
             }
 
-            if (right.is_none()) {
+            if right.is_none() {
                 right = right_iter.next();
             }
         }
