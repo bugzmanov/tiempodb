@@ -5,6 +5,9 @@ use std::rc::Rc;
 
 mod protocol;
 
+#[cfg(test)]
+mod protocol_fuzz;
+
 struct FakeRc;
 
 impl Dummy<FakeRc> for Rc<str> {

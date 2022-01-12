@@ -1,4 +1,4 @@
-struct Line {
+pub struct Line {
     data: Vec<u8>,
     series_name_len: u8,
     tags: Vec<KV>,

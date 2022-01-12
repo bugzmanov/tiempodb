@@ -13,5 +13,6 @@ Ideas:
     * https://github.com/loiclec/fuzzcheck-rs
 * Better CPU utilization in ingestion pipeline: network card -> CPUs
 * Data sketches (maybe)
-
+* Use zerocopy for parsing:
+    * https://docs.rs/zerocopy/latest/zerocopy/
 
