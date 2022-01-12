@@ -2,11 +2,15 @@ use fuzzcheck::mutators::grammar::*;
 use std::rc::Rc;
 
 fn series_name() -> Rc<Grammar> {
-    regex("([\u{0}-\u{7f}]|.)+")
+    regex("[a-z0-9]{2,10}")
 }
 
 fn kv() -> Rc<Grammar> {
-    concatenation([regex("[^ =,]{1,10}"), literal('='), regex("[^ =,]{1,10}")])
+    concatenation([
+        regex("[a-z0-9]{1,10}"),
+        literal('='),
+        regex("[a-z0-9]{1,10}"),
+    ])
 }
 
 fn kv_value() -> Rc<Grammar> {
@@ -47,6 +51,7 @@ fn fuzz() {
     .serde_serializer()
     .default_sensor_and_pool()
     .arguments_from_cargo_fuzzcheck()
+    .stop_after_first_test_failure(true)
     .launch();
     assert!(!result.found_test_failure);
 }
