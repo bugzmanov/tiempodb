@@ -36,10 +36,13 @@ fn influx_line() -> Rc<Grammar> {
 }
 
 fn run_parsing(line: &str) -> bool {
-    crate::protocol::Line::parse(line.as_bytes(), line.len()).is_some()
+    crate::protocol::Line::parse(line.as_bytes()).is_some()
 }
 
-// #[cfg(not(feature = "no_fuzz"))]
+#[cfg(not(feature = "no_fuzz"))]
+// #[cfg_attr(not(feature = "no_fuzz"), ignore)]
+#[cfg_attr(feature = "no_fuzz", ignore)]
+// #[ignore]
 #[test]
 fn fuzz() {
     let mutator = grammar_based_ast_mutator(influx_line());

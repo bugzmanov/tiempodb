@@ -1,3 +1,4 @@
+#[derive(Debug, Clone)]
 pub struct Line {
     data: Vec<u8>,
     series_name_len: u8,
@@ -6,6 +7,7 @@ pub struct Line {
     timestamp: u64,
 }
 
+#[derive(Debug, Clone)]
 struct KV {
     start: u16,
     end: u16,
@@ -39,15 +41,10 @@ const EQUALS: u8 = '=' as u8;
 const SPACE: u8 = ' ' as u8;
 
 impl Line {
-    fn parse_keyvalues(
-        line: &[u8],
-        size: usize,
-        start: usize,
-        tags: &mut Vec<KV>,
-    ) -> Result<usize, ()> {
+    fn parse_keyvalues(line: &[u8], start: usize, tags: &mut Vec<KV>) -> Result<usize, ()> {
         let mut position = start;
         let mut current_tag = KV::new_kv_from(position as u16);
-        while position < size && line[position] != SPACE {
+        while position < line.len() && line[position] != SPACE {
             match line[position] {
                 EQUALS => {
                     current_tag.divider = position as u16;
@@ -100,12 +97,16 @@ impl Line {
         self.kvs_to_str(&self.fields)
     }
 
-    pub fn parse(line: &[u8], size: usize) -> Option<Line> {
+    pub fn parse(line: &[u8]) -> Option<Line> {
+        let size = line.len();
         let mut data = Vec::from(line);
         let mut series_name_len = 0;
         let mut position = 0 as usize;
 
         while position < size && line[position] != COMMA && line[position] != SPACE {
+            if line[position] == EQUALS {
+                return None;
+            }
             position += 1;
         }
 
@@ -116,7 +117,7 @@ impl Line {
         let mut tags = Vec::new();
         if line[position] == COMMA {
             position += 1;
-            match Line::parse_keyvalues(&line, size, position, &mut tags) {
+            match Line::parse_keyvalues(&line, position, &mut tags) {
                 Ok(new_position) => position = new_position,
                 Err(()) => return None,
             }
@@ -130,7 +131,7 @@ impl Line {
 
         let mut fields = Vec::new();
 
-        match Line::parse_keyvalues(&line, size, position, &mut fields) {
+        match Line::parse_keyvalues(&line, position, &mut fields) {
             Ok(new_position) => position = new_position,
             Err(()) => return None,
         }
@@ -142,9 +143,14 @@ impl Line {
         position += 1;
         let mut timestamp = 0 as u64;
 
+        let before_ts = position;
         while position < size && line[position] >= 48 && line[position] <= 57 {
             timestamp = timestamp * 10 + (line[position] - 48) as u64;
             position += 1;
+        }
+
+        if before_ts == position {
+            return None;
         }
 
         Some(Line {
@@ -159,13 +165,15 @@ impl Line {
 
 #[cfg(test)]
 mod test {
+    use claim::assert_none;
+
     use super::*;
 
     #[test]
     fn simple_test() {
         let str =
             "weather,location=us-midwest,country=us temperature=82,humidity=75 1465839830100400200";
-        let line = Line::parse(str.as_bytes(), str.len()).expect("should exist");
+        let line = Line::parse(str.as_bytes()).expect("should exist");
         assert_eq!("weather", line.timeseries_name());
 
         assert_eq!(1465839830100400200, line.timestamp);
@@ -178,5 +186,41 @@ mod test {
             vec![("temperature", "82"), ("humidity", "75")],
             line.fields()
         );
+    }
+
+    #[test]
+    fn no_tags() {
+        let str = "weather temperature=82,humidity=75 1465839830100400200";
+        let line = Line::parse(str.as_bytes()).expect("should exist");
+        assert_eq!("weather", line.timeseries_name());
+
+        assert_eq!(1465839830100400200, line.timestamp);
+
+        assert_eq!(Vec::<(&str, &str)>::new(), line.tags());
+        assert_eq!(
+            vec![("temperature", "82"), ("humidity", "75")],
+            line.fields()
+        );
+    }
+
+    #[test]
+    fn timestamp_is_manadtory() {
+        let str = "weather temperature=82,humidity=75";
+        let line = Line::parse(str.as_bytes());
+        assert_none!(line);
+    }
+
+    #[test]
+    fn series_name_is_mandatory() {
+        let str = "temperature=82,humidity=75 1465839830100400200";
+        let line = Line::parse(str.as_bytes());
+        assert_none!(line);
+    }
+
+    #[test]
+    fn at_least_one_field_is_required() {
+        let str = "weather 1465839830100400200";
+        let line = Line::parse(str.as_bytes());
+        assert_none!(line);
     }
 }
