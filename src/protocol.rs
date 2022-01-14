@@ -4,7 +4,7 @@ pub struct Line {
     series_name_len: u8,
     tags: Vec<KV>,
     fields: Vec<KV>,
-    timestamp: u64,
+    pub timestamp: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -33,6 +33,44 @@ impl KV {
 
     fn is_complete(&self) -> bool {
         self.start != 0 && self.end != 0 && self.divider != 0
+    }
+}
+
+struct LineFieldIter<'a> {
+    line: &'a Line,
+    curr_field: usize,
+}
+
+impl LineFieldIter<'_> {
+    fn new<'a>(line: &'a Line) -> LineFieldIter<'a> {
+        LineFieldIter {
+            line: line,
+            curr_field: 0,
+        }
+    }
+}
+
+impl<'a> Iterator for LineFieldIter<'a> {
+    type Item = (&'a str, &'a str);
+
+    fn next(&mut self) -> Option<(&'a str, &'a str)> {
+        if self.curr_field >= self.line.fields.len() {
+            return None;
+        } else {
+            let kv: &KV = unsafe { self.line.fields.get_unchecked(self.curr_field) };
+            let key = unsafe {
+                std::str::from_utf8_unchecked(
+                    &self.line.data[kv.start as usize..kv.divider as usize],
+                )
+            };
+            let value = unsafe {
+                std::str::from_utf8_unchecked(
+                    &self.line.data[(kv.divider + 1) as usize..kv.end as usize],
+                )
+            };
+            self.curr_field += 1;
+            return Some((key, value));
+        }
     }
 }
 
@@ -95,6 +133,10 @@ impl Line {
 
     pub fn fields(&self) -> Vec<(&str, &str)> {
         self.kvs_to_str(&self.fields)
+    }
+
+    pub fn fields_iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        LineFieldIter::new(self)
     }
 
     pub fn parse(line: &[u8]) -> Option<Line> {
@@ -222,5 +264,17 @@ mod test {
         let str = "weather 1465839830100400200";
         let line = Line::parse(str.as_bytes());
         assert_none!(line);
+    }
+
+    #[test]
+    fn test_field_iterator() {
+        let str =
+            "weather,location=us-midwest,country=us temperature=82,humidity=75 1465839830100400200";
+        let line = Line::parse(str.as_bytes()).expect("should exist");
+        let fields_from_iter: Vec<(&str, &str)> = line.fields_iter().collect();
+        assert_eq!(
+            vec![("temperature", "82"), ("humidity", "75")],
+            fields_from_iter
+        );
     }
 }

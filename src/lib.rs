@@ -1,3 +1,4 @@
+mod ingest;
 mod protocol;
 mod storage;
 

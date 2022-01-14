@@ -1,5 +1,4 @@
-
-use fake::{Dummy, Fake, Faker};
+use fake::{Dummy, Fake};
 use rand::Rng;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -13,11 +12,21 @@ impl Dummy<FakeRc> for Rc<str> {
 }
 
 #[derive(Clone, Debug, Eq, Dummy)]
-struct DataPoint {
+pub struct DataPoint {
     #[dummy(faker = "FakeRc")]
     name: Rc<str>,
     timestamp: u64,
     value: i64,
+}
+
+impl DataPoint {
+    pub fn new(name: Rc<str>, timestamp: u64, value: i64) -> Self {
+        DataPoint {
+            name: name.clone(),
+            timestamp: timestamp,
+            value: value,
+        }
+    }
 }
 
 impl PartialEq for DataPoint {
@@ -26,13 +35,13 @@ impl PartialEq for DataPoint {
     }
 }
 
-trait Storage {
+pub trait Storage {
     fn add(&mut self, point: DataPoint);
     fn add_bulk(&mut self, points: &[DataPoint]);
     fn load(&mut self, metric_name: &str) -> Vec<DataPoint>;
 }
 
-struct MemoryStorage {
+pub struct MemoryStorage {
     map: HashMap<Rc<str>, Vec<DataPoint>>,
 }
 
@@ -95,13 +104,13 @@ impl Default for MemoryStorage {
     }
 }
 
-struct SnaphotableStorage {
+pub struct SnaphotableStorage {
     snapshot: MemoryStorage,
     active: MemoryStorage,
 }
 
 impl SnaphotableStorage {
-    fn new() -> Self {
+    pub fn new() -> Self {
         SnaphotableStorage {
             snapshot: MemoryStorage::new(),
             active: MemoryStorage::new(),
