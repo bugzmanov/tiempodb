@@ -14,17 +14,17 @@ impl Dummy<FakeRc> for Rc<str> {
 #[derive(Clone, Debug, Eq, Dummy)]
 pub struct DataPoint {
     #[dummy(faker = "FakeRc")]
-    name: Rc<str>,
-    timestamp: u64,
-    value: i64,
+    pub name: Rc<str>,
+    pub timestamp: u64,
+    pub value: i64,
 }
 
 impl DataPoint {
     pub fn new(name: Rc<str>, timestamp: u64, value: i64) -> Self {
         DataPoint {
-            name: name.clone(),
-            timestamp: timestamp,
-            value: value,
+            name,
+            timestamp,
+            value,
         }
     }
 }
@@ -67,7 +67,7 @@ impl Storage for MemoryStorage {
         }
     }
     fn add_bulk(&mut self, points: &[DataPoint]) {
-        if points.len() == 0 {
+        if points.is_empty() {
             return;
         }
         let mut curr = &points[0].name;
@@ -77,7 +77,7 @@ impl Storage for MemoryStorage {
             None => self.create_for_key(curr),
         };
 
-        for point in points.into_iter() {
+        for point in points.iter() {
             if &point.name == curr {
                 vector.push(point.clone());
             } else {
@@ -91,9 +91,9 @@ impl Storage for MemoryStorage {
     fn load(&mut self, metric_name: &str) -> Vec<DataPoint> {
         if let Some(data) = self.map.get_mut(metric_name) {
             data.sort_by_key(|metric| metric.timestamp);
-            return data.to_vec();
+            data.to_vec()
         } else {
-            return Vec::new();
+            Vec::new()
         }
     }
 }
@@ -187,6 +187,7 @@ impl Storage for SnaphotableStorage {
 #[cfg(test)]
 mod test {
     use super::*;
+    use fake::Faker;
     // use claim::assert_none;
     // use claim::assert_
 

@@ -42,9 +42,9 @@ struct LineFieldIter<'a> {
 }
 
 impl LineFieldIter<'_> {
-    fn new<'a>(line: &'a Line) -> LineFieldIter<'a> {
+    fn new(line: &Line) -> LineFieldIter<'_> {
         LineFieldIter {
-            line: line,
+            line,
             curr_field: 0,
         }
     }
@@ -55,7 +55,7 @@ impl<'a> Iterator for LineFieldIter<'a> {
 
     fn next(&mut self) -> Option<(&'a str, &'a str)> {
         if self.curr_field >= self.line.fields.len() {
-            return None;
+            None
         } else {
             let kv: &KV = unsafe { self.line.fields.get_unchecked(self.curr_field) };
             let key = unsafe {
@@ -69,14 +69,14 @@ impl<'a> Iterator for LineFieldIter<'a> {
                 )
             };
             self.curr_field += 1;
-            return Some((key, value));
+            Some((key, value))
         }
     }
 }
 
-const COMMA: u8 = ',' as u8;
-const EQUALS: u8 = '=' as u8;
-const SPACE: u8 = ' ' as u8;
+const COMMA: u8 = b',';
+const EQUALS: u8 = b'=';
+const SPACE: u8 = b' ';
 
 impl Line {
     fn parse_keyvalues(line: &[u8], start: usize, tags: &mut Vec<KV>) -> Result<usize, ()> {
@@ -141,9 +141,8 @@ impl Line {
 
     pub fn parse(line: &[u8]) -> Option<Line> {
         let size = line.len();
-        let mut data = Vec::from(line);
-        let mut series_name_len = 0;
-        let mut position = 0 as usize;
+        let data = Vec::from(line);
+        let mut position = 0_usize;
 
         while position < size && line[position] != COMMA && line[position] != SPACE {
             if line[position] == EQUALS {
@@ -155,11 +154,11 @@ impl Line {
         if position == size {
             return None;
         }
-        series_name_len = position;
+        let series_name_len = position;
         let mut tags = Vec::new();
         if line[position] == COMMA {
             position += 1;
-            match Line::parse_keyvalues(&line, position, &mut tags) {
+            match Line::parse_keyvalues(line, position, &mut tags) {
                 Ok(new_position) => position = new_position,
                 Err(()) => return None,
             }
@@ -173,7 +172,7 @@ impl Line {
 
         let mut fields = Vec::new();
 
-        match Line::parse_keyvalues(&line, position, &mut fields) {
+        match Line::parse_keyvalues(line, position, &mut fields) {
             Ok(new_position) => position = new_position,
             Err(()) => return None,
         }
@@ -183,7 +182,7 @@ impl Line {
         }
 
         position += 1;
-        let mut timestamp = 0 as u64;
+        let mut timestamp = 0_u64;
 
         let before_ts = position;
         while position < size && line[position] >= 48 && line[position] <= 57 {
@@ -196,11 +195,11 @@ impl Line {
         }
 
         Some(Line {
-            data: data,
+            data,
             series_name_len: series_name_len as u8,
-            tags: tags,
-            fields: fields,
-            timestamp: timestamp,
+            tags,
+            fields,
+            timestamp,
         })
     }
 }

@@ -27,3 +27,6 @@ Ideas:
 * Data sketches (maybe)
 * Use zerocopy for parsing:
     * https://docs.rs/zerocopy/latest/zerocopy/
+
+* Try MemtableTrie ? 
+    * https://github.com/blambov/cassandra/blob/CASSANDRA-17240/src/java/org/apache/cassandra/db/tries/MemtableTrie.md
