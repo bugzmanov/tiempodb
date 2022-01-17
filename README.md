@@ -3,15 +3,15 @@ Goals:
 * InfluxDB compatible query language (to be supported by grafana)
 
 Plan: 
-[ ] WAL
-    [ ] Ingestion
-    [ ] Recovery
-[ ] Multi-threading for storage
-[ ] Storage writer
-[ ] Storage reader
-[ ] Compaction
-[ ] Query support
-[ ] Index
+- [ ] WAL
+   - [ ] Ingestion
+   - [ ] Recovery
+- [ ] Multi-threading for storage
+- [ ] Storage writer
+- [ ] Storage reader
+- [ ] Compaction
+- [ ] Query support
+- [ ] Index
 
 Ideas:
 * SIMD instructions to do aggregations 
@@ -30,3 +30,7 @@ Ideas:
 
 * Try MemtableTrie ? 
     * https://github.com/blambov/cassandra/blob/CASSANDRA-17240/src/java/org/apache/cassandra/db/tries/MemtableTrie.md
+
+* Set up benches:
+    * https://github.com/BurntSushi/cargo-benchcmp
+    * https://docs.rs/dhat/latest/dhat/
