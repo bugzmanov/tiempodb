@@ -65,6 +65,10 @@ impl<T: Storage> Engine<T> {
                 None => break,
             }
         }
+        dbg!(iter.last_successfull_read_position());
+        storage
+            .wal
+            .truncate(iter.last_successfull_read_position())?;
 
         Ok(storage)
     }
@@ -125,6 +129,56 @@ mod test {
                 .collect::<Vec<(i64, u64)>>(),
             vec![(0, 1465839830100400200), (2, 1465839830100400201)]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_restore_from_corrupt_wall() -> io::Result<()> {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let file_name = file.path().to_str().unwrap();
+
+        let storage = storage::SnaphotableStorage::new();
+        let mut engine = Engine::new(storage, file_name)?;
+        let line_str =
+            "weather,location=us-midwest,country=us temperature=0,humidity=1 1465839830100400200";
+        engine.ingest(&line_str)?;
+        let line2_str =
+            "weather,location=us-midwest,country=us temperature=2,humidity=3 1465839830100400201";
+        engine.ingest(&line2_str)?;
+
+        engine.wal.corrupt_last_record()?;
+
+        let storage = storage::SnaphotableStorage::new();
+        let mut engine = Engine::restore_from_wal(storage, file_name)?;
+
+        let metrics = engine.storage.load("weather:temperature");
+
+        assert_eq!(
+            metrics
+                .into_iter()
+                .map(|m| (m.value, m.timestamp))
+                .collect::<Vec<(i64, u64)>>(),
+            vec![(0, 1465839830100400200)]
+        );
+
+        let line2_str = "weather,location=us-midwest,country=us temperature=4 1465839830100400202";
+        engine.ingest(&line2_str)?;
+        engine.wal.flush_and_sync()?;
+
+        let storage = storage::SnaphotableStorage::new();
+        let mut engine = Engine::restore_from_wal(storage, file_name)?;
+
+        let metrics = engine.storage.load("weather:temperature");
+
+        assert_eq!(
+            metrics
+                .into_iter()
+                .map(|m| (m.value, m.timestamp))
+                .collect::<Vec<(i64, u64)>>(),
+            vec![(0, 1465839830100400200), (4, 1465839830100400202)]
+        );
+
+        engine.ingest(&line2_str)?;
         Ok(())
     }
 }

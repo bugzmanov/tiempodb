@@ -4,16 +4,28 @@ use streaming_iterator::StreamingIterator;
 
 pub struct Wal {
     log: fs::File,
+    dirty_bytes: usize,
 }
 
 impl Wal {
+    const MAX_DIRTY_BYTES: usize = 1024 * 1024; //todo make configurable
+
     pub fn new(path: &str) -> io::Result<Self> {
         let log = fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .open(path)?;
-        Ok(Wal { log })
+        Ok(Wal {
+            log,
+            dirty_bytes: 0,
+        })
+    }
+
+    pub fn from_position(path: &str, position: u64) -> io::Result<Self> {
+        let mut wal = Wal::new(path)?;
+        wal.log.seek(io::SeekFrom::Start(position))?;
+        Ok(wal)
     }
 
     fn crc32(block: &[u8]) -> u32 {
@@ -25,6 +37,7 @@ impl Wal {
     pub fn flush_and_sync(&mut self) -> io::Result<()> {
         self.log.flush()?;
         self.log.sync_all()?;
+        self.dirty_bytes = 0;
         Ok(())
     }
 
@@ -33,13 +46,34 @@ impl Wal {
         self.log.write_all(&(block.len() as u64).to_le_bytes())?;
         self.log.write_all(&crc32.to_le_bytes())?;
         self.log.write_all(block)?;
+        self.dirty_bytes += block.len() + 12;
+        if self.dirty_bytes > Wal::MAX_DIRTY_BYTES {
+            self.flush_and_sync()?;
+        }
+        Ok(())
+    }
+
+    pub fn truncate(&mut self, position: u64) -> io::Result<()> {
+        self.log.seek(io::SeekFrom::Start(position))?;
+        self.log.set_len(position)?;
+        self.log.sync_all()?;
         Ok(())
     }
 
     #[cfg(test)]
-    fn corrupt_last_record(&mut self) -> io::Result<()> {
+    pub fn corrupt_last_record(&mut self) -> io::Result<()> {
         self.log.seek(io::SeekFrom::End(-3))?;
         self.log.set_len(self.log.metadata()?.len() - 3)?;
+        self.log.sync_all()?;
+        self.log.flush()?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn corrupt_last_block_crc32(&mut self, last_block_size: i64) -> io::Result<()> {
+        self.log.seek(io::SeekFrom::End(-last_block_size - 4))?;
+        self.log.write_all(&[0; 4])?;
+        self.log.seek(io::SeekFrom::End(0))?;
         self.log.flush()?;
         self.log.sync_all()?;
         Ok(())
@@ -77,20 +111,28 @@ impl WalBlockReader {
         WalBlockIterator {
             link: self,
             status: Ok(None),
+            last_successfull_read_position: 0u64,
         }
     }
 
     fn file_size(&self) -> io::Result<u64> {
         Ok(self.reader.get_ref().metadata()?.len())
     }
+
+    fn log_position(&mut self) -> io::Result<u64> {
+        Ok(self.reader.stream_position()?)
+    }
 }
 
 pub struct WalBlockIterator {
     link: WalBlockReader,
     status: Result<Option<usize>, io::Error>,
+    last_successfull_read_position: u64,
 }
 
 impl WalBlockIterator {
+    const BLOCK_HEADER_SIZE: usize = 12;
+
     pub fn consume_next<F: FnOnce(Result<&[u8], io::Error>)>(&mut self, consumer: F) -> bool {
         let mut status = Ok(None);
         let result = self._consume_next(|block| {
@@ -147,17 +189,38 @@ impl WalBlockIterator {
         }
         let block_crc32 = Wal::crc32(&self.link.buf[0..block_size]);
         if block_crc32 != expected_crc32 {
-            consumer(Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{}: crc32 error check fail.Data block on a disk is broken",
-                    self.link.file_name
-                ),
-            )));
-            return false;
+            match self.link.log_position() {
+                Ok(position) => {
+                    log::warn!(
+                        "WAL Block at {}:{} crc32 check failure. This block will be skipped",
+                        self.link.file_name,
+                        (position as usize) - block_size - WalBlockIterator::BLOCK_HEADER_SIZE
+                    );
+                    return self._consume_next(consumer);
+                }
+                Err(e) => {
+                    consumer(Err(e));
+                    return false;
+                }
+            }
+        }
+        match self.link.log_position() {
+            //todo create macro to handle Err
+            Ok(position) => {
+                dbg!(position);
+                self.last_successfull_read_position = position;
+            }
+            Err(e) => {
+                consumer(Err(e));
+                return false;
+            }
         }
         consumer(Ok(&self.link.buf[0..block_size]));
         true
+    }
+
+    pub fn last_successfull_read_position(&self) -> u64 {
+        self.last_successfull_read_position
     }
 }
 
@@ -275,6 +338,34 @@ mod test {
             iter.advance();
             assert_none!(iter.get());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn blocks_with_invalid_crc32_should_be_skipped() -> io::Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        let file_name = file.path().to_str().unwrap();
+
+        let mut wal = Wal::new(file_name)?;
+        wal.write("first".as_bytes())?;
+        wal.write("second".as_bytes())?;
+        wal.corrupt_last_block_crc32("second".as_bytes().len() as i64)?;
+        wal.write("third".as_bytes())?;
+        wal.flush_and_sync()?;
+
+        let reader = WalBlockReader::read(file_name).unwrap();
+        let mut iter = reader.into_iter();
+        let mut result = Vec::new();
+        loop {
+            iter.advance();
+            match iter.get() {
+                Some(v) => {
+                    unsafe { result.push(String::from_utf8_unchecked(Vec::from(v))) };
+                }
+                None => break,
+            }
+        }
+        assert_eq!(result, vec!["first".to_string(), "third".to_string()]);
         Ok(())
     }
 }
