@@ -2,12 +2,12 @@ use std::io::{self, BufReader, Read, Seek};
 use std::{fs, io::Write};
 use streaming_iterator::StreamingIterator;
 
-struct Wal {
+pub struct Wal {
     log: fs::File,
 }
 
 impl Wal {
-    fn new(path: &str) -> io::Result<Self> {
+    pub fn new(path: &str) -> io::Result<Self> {
         let log = fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -46,7 +46,7 @@ impl Wal {
     }
 }
 
-struct WalBlockReader {
+pub struct WalBlockReader {
     reader: BufReader<fs::File>,
     buf: Vec<u8>,
     header_buf: [u8; 8 + 4],
@@ -85,7 +85,7 @@ impl WalBlockReader {
     }
 }
 
-struct WalBlockIterator {
+pub struct WalBlockIterator {
     link: WalBlockReader,
     status: Result<Option<usize>, io::Error>,
 }
