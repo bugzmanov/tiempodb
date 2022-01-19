@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 mod ingest;
+mod partition;
 mod protocol;
 mod storage;
 mod wal;

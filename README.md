@@ -34,3 +34,14 @@ Ideas:
 * Set up benches:
     * https://github.com/BurntSushi/cargo-benchcmp
     * https://docs.rs/dhat/latest/dhat/
+
+
+Refs:
+* replication:
+    * https://blog.acolyer.org/2019/03/15/exploiting-commutativity-for-practical-fast-replication/
+* tsdbs: 
+    * https://fabxc.org/tsdb/
+    * https://nakabonne.dev/posts/write-tsdb-from-scratch/
+    * https://static-curis.ku.dk/portal/files/248553347/ByteSeries_v_final.pdf
+    * https://www.usenix.org/system/files/conference/fast16/fast16-papers-andersen.pdf
+    * https://www.vldb.org/pvldb/vol8/p1816-teller.pdf
