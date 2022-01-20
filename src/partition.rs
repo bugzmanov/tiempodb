@@ -1,4 +1,5 @@
 use crate::storage::DataPoint;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -8,7 +9,7 @@ use std::io::Write;
 use std::path::Path;
 use std::rc::Rc;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct Partition {
     start_time: u64,
     end_time: u64,
@@ -25,7 +26,7 @@ impl Partition {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct MetricsMeta {
     metric_name: String,
     start_time: u64,
@@ -142,9 +143,6 @@ impl PartitionReader {
             dbg!(buf.capacity());
 
             buf_reader.read_exact(&mut buf)?;
-            // buf_reader = buf_reader.take(metric_meta.uncompressed_size).
-            // buf_reader
-            //     .read_to_end(&mut buf);
             for point in buf.chunks(16) {
                 let timestamp = u64::from_le_bytes(point[0..8].try_into().unwrap());
                 let value = i64::from_le_bytes(point[8..16].try_into().unwrap());
@@ -158,12 +156,55 @@ impl PartitionReader {
     }
 }
 
+struct PartitionManager {}
+
+impl PartitionManager {
+    fn save_meta(path: &Path, partition: &Partition) -> io::Result<()> {
+        let json = serde_json::to_string(partition)?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?;
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?;
+        file.flush()
+    }
+
+    //todo introduce anyhow
+    fn load_meta(path: &Path) -> io::Result<Partition> {
+        let file = fs::OpenOptions::new().read(true).open(path)?;
+        let file_size = file.metadata()?.len() as usize;
+        let mut reader = io::BufReader::new(file);
+        let mut data = Vec::with_capacity(file_size);
+        reader.read_to_end(&mut data)?;
+        // String::from_utf8(data).map(|json_str| serde_json::from_str::<Partition>(&json_str))
+        match String::from_utf8(data) {
+            Ok(data_str) => match serde_json::from_str::<Partition>(&data_str) {
+                Ok(partition) => return Ok(partition),
+                Err(e) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("failed to parse json in {:?}", path.to_str()),
+                    ))
+                }
+            },
+            Err(e) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("failed to parse json in {:?}", path.to_str()),
+                ))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
 
     #[test]
-    fn ial() -> io::Result<()> {
+    fn test_partition_read_write() -> io::Result<()> {
         let file = tempfile::NamedTempFile::new()?;
 
         let mut data = HashMap::new();
@@ -180,6 +221,33 @@ mod test {
         let read_data = PartitionReader::read_partition(file.path(), &partition)?;
 
         assert_eq!(read_data, data);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_partion_meta_write_read() -> io::Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+
+        let mut partition = Partition::new();
+        partition.metrics.push(MetricsMeta::new(
+            "metric1".to_string(),
+            1234,
+            4567,
+            8910,
+            1234,
+        ));
+        partition
+            .metrics
+            .push(MetricsMeta::new("metric2".to_string(), 14, 47, 810, 1321));
+        partition.start_time = 10;
+        partition.end_time = 60;
+
+        PartitionManager::save_meta(&file.path(), &partition)?;
+
+        let read_partition = PartitionManager::load_meta(&file.path())?;
+
+        assert_eq!(read_partition, partition);
 
         Ok(())
     }
