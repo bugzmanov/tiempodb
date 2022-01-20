@@ -176,7 +176,7 @@ impl WalBlockIterator {
         }
 
         if block_size >= self.link.buf.capacity() {
-            self.link.buf = Vec::with_capacity(block_size); //todo extend?
+            self.link.buf = vec![0; block_size]; //todo extend?
         }
 
         if let Err(e) = self

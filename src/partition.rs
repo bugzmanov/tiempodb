@@ -70,7 +70,7 @@ struct PartitionWriter {
 impl PartitionWriter {
     pub fn write_partition(
         path: &Path,
-        data: HashMap<Rc<str>, Vec<DataPoint>>,
+        data: &mut HashMap<Rc<str>, Vec<DataPoint>>,
     ) -> io::Result<Partition> {
         // data.sort_by_key(|metric| metric.timestamp);
         let file = fs::OpenOptions::new().write(true).create(true).open(path)?;
@@ -96,7 +96,7 @@ impl PartitionWriter {
             );
             meta.start_offset = buf_writer.get_ref().get_ref().stream_position()?; //todo
 
-            for point in points {
+            for point in points.iter() {
                 buf_writer.write_all(&point.timestamp.to_le_bytes())?;
                 buf_writer.write_all(&point.value.to_le_bytes())?;
             }
@@ -121,26 +121,31 @@ impl PartitionReader {
         partition: &Partition,
     ) -> io::Result<HashMap<Rc<str>, Vec<DataPoint>>> {
         // data.sort_by_key(|metric| metric.timestamp);
+        dbg!(path);
         let file = fs::OpenOptions::new()
+            .read(true)
             .write(false)
             .create(false)
             .open(path)?;
-
         let mut buf_reader =
             io::BufReader::new(zstd::Decoder::new(file).expect("zstd encoder failure"));
 
         let first = partition.metrics.first().unwrap();
-        let mut buf = Vec::with_capacity(first.uncompressed_size as usize);
+        let mut buf = vec![0; first.uncompressed_size as usize];
 
         let mut result = HashMap::new();
         for ref metric_meta in partition.metrics.iter() {
             let name: Rc<str> = Rc::from(metric_meta.metric_name.as_str());
             let mut metrics = Vec::with_capacity(metric_meta.size);
             if buf.capacity() < metric_meta.uncompressed_size as usize {
-                buf = Vec::with_capacity(metric_meta.uncompressed_size as usize)
+                buf = vec![0; metric_meta.uncompressed_size as usize];
             }
+            dbg!(buf.capacity());
 
-            buf_reader.read_exact(&mut buf[0..metric_meta.uncompressed_size as usize])?;
+            buf_reader.read_exact(&mut buf)?;
+            // buf_reader = buf_reader.take(metric_meta.uncompressed_size).
+            // buf_reader
+            //     .read_to_end(&mut buf);
             for point in buf.chunks(16) {
                 let timestamp = u64::from_le_bytes(point[0..8].try_into().unwrap());
                 let value = i64::from_le_bytes(point[8..16].try_into().unwrap());
@@ -159,20 +164,23 @@ mod test {
     use super::*;
 
     #[test]
-    fn initial() -> io::Result<()> {
+    fn ial() -> io::Result<()> {
         let file = tempfile::NamedTempFile::new()?;
 
         let mut data = HashMap::new();
-        let metric_name: Rc<str> = Rc::from("metric_1");
-        data.insert(
-            metric_name.clone(),
-            vec![DataPoint::new(metric_name.clone(), 100u64, 200i64)],
-        );
-        let partition = PartitionWriter::write_partition(file.path(), data)?;
-        dbg!(&partition);
-
+        (0..10).for_each(|metric_idx| {
+            let metric_name: Rc<str> = Rc::from(format!("metric_{metric_idx}"));
+            data.insert(
+                metric_name.clone(),
+                (0..10)
+                    .map(|i| DataPoint::new(metric_name.clone(), 100u64 + i, 200i64 + i as i64))
+                    .collect(),
+            );
+        });
+        let partition = PartitionWriter::write_partition(file.path(), &mut data)?;
         let read_data = PartitionReader::read_partition(file.path(), &partition)?;
-        dbg!(read_data);
+
+        assert_eq!(read_data, data);
 
         Ok(())
     }
