@@ -5,7 +5,6 @@ use std::io;
 use std::io::Read;
 use std::io::Seek;
 use std::io::Write;
-use std::os::unix::prelude::FileExt;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -134,7 +133,7 @@ impl PartitionReader {
         let mut buf = vec![0; first.uncompressed_size as usize];
 
         let mut result = HashMap::new();
-        for ref metric_meta in partition.metrics.iter() {
+        for metric_meta in partition.metrics.iter() {
             let name: Rc<str> = Rc::from(metric_meta.metric_name.as_str());
             let mut metrics = Vec::with_capacity(metric_meta.size);
             if buf.capacity() < metric_meta.uncompressed_size as usize {

@@ -120,7 +120,7 @@ impl WalBlockReader {
     }
 
     fn log_position(&mut self) -> io::Result<u64> {
-        Ok(self.reader.stream_position()?)
+        self.reader.stream_position()
     }
 }
 
