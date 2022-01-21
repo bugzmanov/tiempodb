@@ -7,7 +7,29 @@ use std::io::Read;
 use std::io::Seek;
 use std::io::Write;
 use std::path::Path;
+use std::path::PathBuf;
 use std::rc::Rc;
+
+// macro_rules! ignore_not_found {
+//     ($a:ident($($b:tt)*))=>{
+//        {
+//         match $a($($b)*) {
+//             ok@Ok => ok,
+//             Err(err) if err == io::ErrorKind::NotFound => Ok(())
+//             err@Err => err
+//         }
+//         }
+//     };
+// }
+
+#[inline]
+fn ignore_not_found(result: io::Result<()>) -> io::Result<()> {
+    return match result {
+        ok @ Ok(_) => ok,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        err @ Err(_) => err,
+    };
+}
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct Partition {
@@ -70,7 +92,7 @@ struct PartitionWriter {
 impl PartitionWriter {
     pub fn write_partition(
         path: &Path,
-        data: &mut HashMap<Rc<str>, Vec<DataPoint>>,
+        data: &mut HashMap<Rc<str>, Vec<DataPoint>>, //todo: get rid of mut
     ) -> io::Result<Partition> {
         // data.sort_by_key(|metric| metric.timestamp);
         let file = fs::OpenOptions::new().write(true).create(true).open(path)?;
@@ -156,9 +178,95 @@ impl PartitionReader {
     }
 }
 
-struct PartitionManager {}
+struct PartitionManager {
+    partitions_dir: PathBuf,
+    last_partition_id: usize,
+}
 
 impl PartitionManager {
+    fn tmp_data_file(&self, partition_id: usize) -> PathBuf {
+        self.partitions_dir
+            .join(format!("partition_{partition_id}.data-tmp"))
+    }
+
+    fn data_file(&self, partition_id: usize) -> PathBuf {
+        self.partitions_dir
+            .join(format!("partition_{partition_id}.data"))
+    }
+
+    fn meta_file(&self, partition_id: usize) -> PathBuf {
+        self.partitions_dir
+            .join(format!("partition_{partition_id}.meta"))
+    }
+
+    fn try_recover(&mut self, parition_id: usize) -> io::Result<bool> {
+        todo!("not implemented yet")
+    }
+
+    fn remove_partition(&self, partition_id: usize) -> io::Result<()> {
+        ignore_not_found(fs::remove_file(self.tmp_data_file(partition_id)))?;
+        ignore_not_found(fs::remove_file(self.meta_file(partition_id)))
+    }
+
+    fn list_partitions(&self) -> io::Result<Vec<Partition>> {
+        let mut result = Vec::new();
+        for dir_entry_res in fs::read_dir(self.partitions_dir.clone())? {
+            let dir_entry = dir_entry_res?;
+            let file_name = if let Ok(file) = dir_entry.file_name().into_string() {
+                file
+            } else {
+                continue;
+            };
+
+            if let Some((size, ttype)) = PartitionManager::parse_file_name(&file_name) {
+                //todo
+                todo!("sasda")
+            }
+        }
+        Ok(result)
+    }
+
+    fn parse_file_name(file_name: &str) -> Option<(usize, &str)> {
+        if let [name, suffix] = file_name.split("_").collect::<Vec<&str>>().as_slice() {
+            if *name != "partition" {
+                return None;
+            }
+            if let [idx, ttype] = (*suffix).split(".").collect::<Vec<&str>>().as_slice() {
+                (*idx)
+                    .parse::<usize>()
+                    .map_or(None, |idx_num| Some((idx_num, *ttype)))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    fn roll_new_partition(
+        &mut self,
+        metrics: &mut HashMap<Rc<str>, Vec<DataPoint>>,
+    ) -> io::Result<()> {
+        let next_partition_id = self.last_partition_id + 1;
+        let tmp_partition_file = self.tmp_data_file(next_partition_id);
+
+        if fs::try_exists(tmp_partition_file.clone())? {
+            if let Ok(true) = self.try_recover(next_partition_id) {
+                return self.roll_new_partition(metrics);
+            }
+            self.remove_partition(next_partition_id)?;
+        }
+
+        let new_partition = PartitionWriter::write_partition(&tmp_partition_file, metrics)?; //todo: clean ups in case of failure
+
+        let metadata_file = self.meta_file(next_partition_id);
+        PartitionManager::save_meta(&metadata_file, &new_partition)?;
+        fs::rename(tmp_partition_file, self.data_file(next_partition_id))?;
+        self.last_partition_id = next_partition_id;
+
+        Ok(())
+    }
+
     fn save_meta(path: &Path, partition: &Partition) -> io::Result<()> {
         let json = serde_json::to_string(partition)?;
         let mut file = fs::OpenOptions::new()
@@ -201,6 +309,8 @@ impl PartitionManager {
 
 #[cfg(test)]
 mod test {
+    use claim::assert_none;
+
     use super::*;
 
     #[test]
@@ -250,5 +360,24 @@ mod test {
         assert_eq!(read_partition, partition);
 
         Ok(())
+    }
+
+    #[test]
+    fn parse_file_name_success() {
+        let (idx, ttyp) = PartitionManager::parse_file_name("partition_12.meta").unwrap();
+        assert_eq!(12, idx);
+        assert_eq!("meta", ttyp);
+    }
+
+    #[test]
+    fn parse_file_name_bad_format() {
+        assert_none!(PartitionManager::parse_file_name("partition_12")); // no type
+        assert_none!(PartitionManager::parse_file_name("partition.meta")); // no idx
+        assert_none!(PartitionManager::parse_file_name(
+            "partition_notanumber.meta"
+        )); // idx is no number
+        assert_none!(PartitionManager::parse_file_name(
+            "partition_12_this_should_not_exist.meta"
+        )); // idx is no number
     }
 }
