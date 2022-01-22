@@ -1,6 +1,6 @@
 use crate::storage::DataPoint;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::io::Read;
@@ -181,9 +181,27 @@ impl PartitionReader {
 struct PartitionManager {
     partitions_dir: PathBuf,
     last_partition_id: usize,
+    partitions: Vec<Partition>,
 }
 
 impl PartitionManager {
+    pub fn new(partitions_dir: &Path) -> io::Result<Self> {
+        let mut manager = PartitionManager {
+            partitions_dir: partitions_dir.to_path_buf(),
+            last_partition_id: 0,
+            partitions: Vec::new(), //todo: unnecessary allocation
+        };
+
+        let mut existing_partitions = manager.list_partitions()?;
+        if !existing_partitions.is_empty() {
+            existing_partitions.sort_by_key(|kv| kv.0);
+            manager.last_partition_id = existing_partitions.last().unwrap().0;
+            manager.partitions = existing_partitions.into_iter().map(|kv| kv.1).collect();
+        }
+
+        Ok(manager)
+    }
+
     fn tmp_data_file(&self, partition_id: usize) -> PathBuf {
         self.partitions_dir
             .join(format!("partition_{partition_id}.data-tmp"))
@@ -208,9 +226,9 @@ impl PartitionManager {
         ignore_not_found(fs::remove_file(self.meta_file(partition_id)))
     }
 
-    fn list_partitions(&self) -> io::Result<Vec<Partition>> {
+    fn list_partitions(&self) -> io::Result<Vec<(usize, Partition)>> {
         let mut result = Vec::new();
-        for dir_entry_res in fs::read_dir(self.partitions_dir.clone())? {
+        for dir_entry_res in fs::read_dir(&self.partitions_dir)? {
             let dir_entry = dir_entry_res?;
             let file_name = if let Ok(file) = dir_entry.file_name().into_string() {
                 file
@@ -218,9 +236,14 @@ impl PartitionManager {
                 continue;
             };
 
-            if let Some((size, ttype)) = PartitionManager::parse_file_name(&file_name) {
-                //todo
-                todo!("sasda")
+            if let Some((idx, ttype)) = PartitionManager::parse_file_name(&file_name) {
+                if ttype != "meta" {
+                    continue;
+                }
+                let metadata = PartitionManager::load_meta(&dir_entry.path())?;
+                if fs::try_exists(self.data_file(idx))? {
+                    result.push((idx, metadata));
+                }
             }
         }
         Ok(result)
@@ -263,6 +286,7 @@ impl PartitionManager {
         PartitionManager::save_meta(&metadata_file, &new_partition)?;
         fs::rename(tmp_partition_file, self.data_file(next_partition_id))?;
         self.last_partition_id = next_partition_id;
+        self.partitions.push(new_partition);
 
         Ok(())
     }
@@ -313,13 +337,10 @@ mod test {
 
     use super::*;
 
-    #[test]
-    fn test_partition_read_write() -> io::Result<()> {
-        let file = tempfile::NamedTempFile::new()?;
-
+    fn generate_metrics_batch(metric_suffix: &str) -> HashMap<Rc<str>, Vec<DataPoint>> {
         let mut data = HashMap::new();
         (0..10).for_each(|metric_idx| {
-            let metric_name: Rc<str> = Rc::from(format!("metric_{metric_idx}"));
+            let metric_name: Rc<str> = Rc::from(format!("metric_{metric_suffix}_{metric_idx}"));
             data.insert(
                 metric_name.clone(),
                 (0..10)
@@ -327,6 +348,14 @@ mod test {
                     .collect(),
             );
         });
+        data
+    }
+
+    #[test]
+    fn test_partition_read_write() -> io::Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+
+        let mut data = generate_metrics_batch("");
         let partition = PartitionWriter::write_partition(file.path(), &mut data)?;
         let read_data = PartitionReader::read_partition(file.path(), &partition)?;
 
@@ -378,6 +407,51 @@ mod test {
         )); // idx is no number
         assert_none!(PartitionManager::parse_file_name(
             "partition_12_this_should_not_exist.meta"
-        )); // idx is no number
+        )); // additional suffixes
+    }
+
+    #[test]
+    fn test_roll_new_partition() -> io::Result<()> {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut manager = PartitionManager::new(&tempdir.path())?;
+        let mut metrics = generate_metrics_batch("first");
+
+        let original_metrics: HashSet<String> = metrics.keys().map(|k| k.to_string()).collect();
+        manager.roll_new_partition(&mut metrics)?;
+
+        let mut manager = PartitionManager::new(&tempdir.path())?;
+        assert_eq!(manager.partitions.len(), 1);
+
+        let loaded_metrics: HashSet<String> = manager
+            .partitions
+            .get(0)
+            .unwrap()
+            .metrics
+            .iter()
+            .map(|m| m.metric_name.clone())
+            .collect();
+
+        assert_eq!(loaded_metrics, original_metrics);
+
+        let mut metrics = generate_metrics_batch("second");
+        manager.roll_new_partition(&mut metrics)?;
+
+        let second_metrics: HashSet<String> = metrics.keys().map(|k| k.to_string()).collect();
+
+        let mut manager = PartitionManager::new(&tempdir.path())?;
+        assert_eq!(manager.partitions.len(), 2);
+
+        let loaded_metrics: HashSet<String> = manager
+            .partitions
+            .get(1)
+            .unwrap()
+            .metrics
+            .iter()
+            .map(|m| m.metric_name.clone())
+            .collect();
+
+        assert_eq!(loaded_metrics, second_metrics);
+
+        Ok(())
     }
 }
