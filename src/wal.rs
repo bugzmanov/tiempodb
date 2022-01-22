@@ -64,8 +64,8 @@ impl Wal {
     pub fn corrupt_last_record(&mut self) -> io::Result<()> {
         self.log.seek(io::SeekFrom::End(-3))?;
         self.log.set_len(self.log.metadata()?.len() - 3)?;
-        self.log.sync_all()?;
         self.log.flush()?;
+        self.log.sync_all()?;
         Ok(())
     }
 

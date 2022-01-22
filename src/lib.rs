@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 #![feature(path_try_exists)]
 mod ingest;
-mod partition;
+pub mod partition;
 mod protocol;
-mod storage;
+pub mod storage;
 mod wal;
 
 #[cfg(test)]

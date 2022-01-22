@@ -1,4 +1,5 @@
 use crate::storage::DataPoint;
+use fail::{fail_point, FailScenario};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -10,18 +11,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-// macro_rules! ignore_not_found {
-//     ($a:ident($($b:tt)*))=>{
-//        {
-//         match $a($($b)*) {
-//             ok@Ok => ok,
-//             Err(err) if err == io::ErrorKind::NotFound => Ok(())
-//             err@Err => err
-//         }
-//         }
-//     };
-// }
-
 #[inline]
 fn ignore_not_found(result: io::Result<()>) -> io::Result<()> {
     return match result {
@@ -32,10 +21,10 @@ fn ignore_not_found(result: io::Result<()>) -> io::Result<()> {
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
-struct Partition {
-    start_time: u64,
-    end_time: u64,
-    metrics: Vec<MetricsMeta>,
+pub struct Partition {
+    pub start_time: u64,
+    pub end_time: u64,
+    pub metrics: Vec<MetricsMeta>,
 }
 
 impl Partition {
@@ -49,15 +38,15 @@ impl Partition {
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
-struct MetricsMeta {
-    metric_name: String,
-    start_time: u64,
-    end_time: u64,
-    size: usize,
-    start_offset: u64,
-    end_offset: u64,
-    uncompressed_size: u64,
-    crc32: u32,
+pub struct MetricsMeta {
+    pub metric_name: String,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub size: usize,
+    pub start_offset: u64,
+    pub end_offset: u64,
+    pub uncompressed_size: u64,
+    pub crc32: u32,
 }
 
 impl MetricsMeta {
@@ -178,10 +167,10 @@ impl PartitionReader {
     }
 }
 
-struct PartitionManager {
-    partitions_dir: PathBuf,
-    last_partition_id: usize,
-    partitions: Vec<Partition>,
+pub struct PartitionManager {
+    pub partitions_dir: PathBuf,
+    pub last_partition_id: usize,
+    pub partitions: Vec<Partition>,
 }
 
 impl PartitionManager {
@@ -217,12 +206,27 @@ impl PartitionManager {
             .join(format!("partition_{partition_id}.meta"))
     }
 
-    fn try_recover(&mut self, parition_id: usize) -> io::Result<bool> {
-        todo!("not implemented yet")
+    fn try_recover(&mut self, partition_id: usize) -> io::Result<bool> {
+        let tmp_data_file = self.tmp_data_file(partition_id);
+        let data_file = self.data_file(partition_id);
+        let meta_fila = self.meta_file(partition_id);
+        if !fs::try_exists(meta_fila)? {
+            return Ok(false);
+        }
+        if fs::try_exists(&data_file)? {
+            // this is weird condition, should probably never happen
+            return Ok(true);
+        } else if fs::try_exists(&tmp_data_file)? {
+            fs::rename(tmp_data_file, data_file)?;
+            return Ok(true);
+        } else {
+            return Ok(false);
+        }
     }
 
-    fn remove_partition(&self, partition_id: usize) -> io::Result<()> {
+    fn remove_partition_if_exists(&self, partition_id: usize) -> io::Result<()> {
         ignore_not_found(fs::remove_file(self.tmp_data_file(partition_id)))?;
+        ignore_not_found(fs::remove_file(self.data_file(partition_id)))?;
         ignore_not_found(fs::remove_file(self.meta_file(partition_id)))
     }
 
@@ -266,29 +270,38 @@ impl PartitionManager {
         }
     }
 
-    fn roll_new_partition(
+    pub fn roll_new_partition(
         &mut self,
         metrics: &mut HashMap<Rc<str>, Vec<DataPoint>>,
-    ) -> io::Result<()> {
+    ) -> io::Result<&Partition> {
         let next_partition_id = self.last_partition_id + 1;
         let tmp_partition_file = self.tmp_data_file(next_partition_id);
+        let metadata_file = self.meta_file(next_partition_id);
 
         if fs::try_exists(tmp_partition_file.clone())? {
             if let Ok(true) = self.try_recover(next_partition_id) {
+                self.partitions
+                    .push(PartitionManager::load_meta(&metadata_file)?);
+                self.last_partition_id = next_partition_id;
                 return self.roll_new_partition(metrics);
             }
-            self.remove_partition(next_partition_id)?;
+            self.remove_partition_if_exists(next_partition_id)?;
         }
 
-        let new_partition = PartitionWriter::write_partition(&tmp_partition_file, metrics)?; //todo: clean ups in case of failure
+        fail::fail_point!("pm-roll-write-meta-step", |_| {
+            Err(io::Error::new(io::ErrorKind::TimedOut, "error"))
+        });
+        let new_partition = PartitionWriter::write_partition(&tmp_partition_file, metrics)?;
 
-        let metadata_file = self.meta_file(next_partition_id);
         PartitionManager::save_meta(&metadata_file, &new_partition)?;
+        fail::fail_point!("pm-roll-rename-step", |_| {
+            Err(io::Error::new(io::ErrorKind::TimedOut, "error"))
+        });
         fs::rename(tmp_partition_file, self.data_file(next_partition_id))?;
         self.last_partition_id = next_partition_id;
         self.partitions.push(new_partition);
 
-        Ok(())
+        Ok(self.partitions.last().unwrap())
     }
 
     fn save_meta(path: &Path, partition: &Partition) -> io::Result<()> {
@@ -299,8 +312,8 @@ impl PartitionManager {
             .truncate(true)
             .open(path)?;
         file.write_all(json.as_bytes())?;
-        file.sync_all()?;
-        file.flush()
+        file.flush()?;
+        file.sync_all()
     }
 
     //todo introduce anyhow
@@ -337,6 +350,15 @@ mod test {
 
     use super::*;
 
+    fn generate_metric(metric_name: &str) -> HashMap<Rc<str>, Vec<DataPoint>> {
+        let mut data = HashMap::new();
+        let metric_name: Rc<str> = Rc::from(metric_name);
+        data.insert(
+            metric_name.clone(),
+            vec![DataPoint::new(metric_name.clone(), 100u64, 200i64)],
+        );
+        data
+    }
     fn generate_metrics_batch(metric_suffix: &str) -> HashMap<Rc<str>, Vec<DataPoint>> {
         let mut data = HashMap::new();
         (0..10).for_each(|metric_idx| {
@@ -411,6 +433,7 @@ mod test {
     }
 
     #[test]
+    #[cfg(not(feature = "fail/failpoints"))]
     fn test_roll_new_partition() -> io::Result<()> {
         let tempdir = tempfile::tempdir().unwrap();
         let mut manager = PartitionManager::new(&tempdir.path())?;
@@ -438,7 +461,7 @@ mod test {
 
         let second_metrics: HashSet<String> = metrics.keys().map(|k| k.to_string()).collect();
 
-        let mut manager = PartitionManager::new(&tempdir.path())?;
+        let manager = PartitionManager::new(&tempdir.path())?;
         assert_eq!(manager.partitions.len(), 2);
 
         let loaded_metrics: HashSet<String> = manager
@@ -452,6 +475,68 @@ mod test {
 
         assert_eq!(loaded_metrics, second_metrics);
 
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "fail/failpoints")]
+    fn test_recoverable_partition_failure() -> io::Result<()> {
+        let scenario = FailScenario::setup();
+        fail::cfg("pm-roll-rename-step", "return").unwrap();
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut manager = PartitionManager::new(&tempdir.path())?;
+        let mut metrics = generate_metric("first");
+        assert_eq!(true, manager.roll_new_partition(&mut metrics).is_err());
+
+        fail::cfg("pm-roll-rename-step", "off").unwrap();
+
+        let mut metrics = generate_metric("second");
+        manager.roll_new_partition(&mut metrics)?;
+
+        assert_eq!(2, manager.partitions.len());
+
+        let metrics: HashSet<String> = manager
+            .partitions
+            .iter()
+            .flat_map(|p| p.metrics.iter().map(|m| m.metric_name.clone()))
+            .collect();
+
+        assert_eq!(
+            metrics,
+            vec!["first".to_string(), "second".to_string()]
+                .into_iter()
+                .collect()
+        );
+
+        scenario.teardown();
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "fail/failpoints")]
+    fn test_partition_failure_data_loss() -> io::Result<()> {
+        let scenario = FailScenario::setup();
+        fail::cfg("pm-roll-write-meta-step", "return").unwrap();
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut manager = PartitionManager::new(&tempdir.path())?;
+        let mut metrics = generate_metric("first");
+        assert_eq!(true, manager.roll_new_partition(&mut metrics).is_err());
+
+        fail::cfg("pm-roll-write-meta-step", "off").unwrap();
+
+        let mut metrics = generate_metric("second");
+        manager.roll_new_partition(&mut metrics)?;
+
+        let metrics: HashSet<String> = manager
+            .partitions
+            .iter()
+            .flat_map(|p| p.metrics.iter().map(|m| m.metric_name.clone()))
+            .collect();
+
+        assert_eq!(metrics, vec!["second".to_string()].into_iter().collect());
+        scenario.teardown();
         Ok(())
     }
 }
