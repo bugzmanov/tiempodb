@@ -1,4 +1,5 @@
 use std::io::{self, BufReader, Read, Seek};
+use std::path::{Path, PathBuf};
 use std::{fs, io::Write};
 use streaming_iterator::StreamingIterator;
 
@@ -10,7 +11,7 @@ pub struct Wal {
 impl Wal {
     const MAX_DIRTY_BYTES: usize = 1024 * 1024; //todo make configurable
 
-    pub fn new(path: &str) -> io::Result<Self> {
+    pub fn new(path: &Path) -> io::Result<Self> {
         let log = fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -22,7 +23,7 @@ impl Wal {
         })
     }
 
-    pub fn from_position(path: &str, position: u64) -> io::Result<Self> {
+    pub fn from_position(path: &Path, position: u64) -> io::Result<Self> {
         let mut wal = Wal::new(path)?;
         wal.log.seek(io::SeekFrom::Start(position))?;
         Ok(wal)
@@ -84,11 +85,11 @@ pub struct WalBlockReader {
     reader: BufReader<fs::File>,
     buf: Vec<u8>,
     header_buf: [u8; 8 + 4],
-    file_name: String,
+    file_name: PathBuf,
 }
 
 impl WalBlockReader {
-    pub fn read(path: &str) -> io::Result<WalBlockReader> {
+    pub fn read(path: &Path) -> io::Result<WalBlockReader> {
         let log = fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -121,6 +122,10 @@ impl WalBlockReader {
 
     fn log_position(&mut self) -> io::Result<u64> {
         self.reader.stream_position()
+    }
+
+    fn log_file_name(&self) -> Option<&str> {
+        self.file_name.to_str()
     }
 }
 
@@ -168,7 +173,7 @@ impl WalBlockIterator {
             Ok(file_size) if (file_size as usize) < block_size => {
                 consumer(Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("{}: block_size is corrupted", self.link.file_name),
+                    format!("{:?}: block_size is corrupted", self.link.log_file_name()),
                 )));
                 return false;
             }
@@ -192,8 +197,8 @@ impl WalBlockIterator {
             match self.link.log_position() {
                 Ok(position) => {
                     log::warn!(
-                        "WAL Block at {}:{} crc32 check failure. This block will be skipped",
-                        self.link.file_name,
+                        "WAL Block at {:?}:{} crc32 check failure. This block will be skipped",
+                        self.link.log_file_name(),
                         (position as usize) - block_size - WalBlockIterator::BLOCK_HEADER_SIZE
                     );
                     return self._consume_next(consumer);
@@ -248,13 +253,12 @@ mod test {
     #[test]
     fn basic() {
         let file = tempfile::NamedTempFile::new().unwrap();
-        let file_name = file.path().to_str().unwrap();
-        let mut wal = Wal::new(file_name).unwrap();
+        let mut wal = Wal::new(file.path()).unwrap();
         wal.write("vo pole bereza stoyala".as_bytes()).unwrap();
         wal.write("vo pole kudryavaya stoyala".as_bytes()).unwrap();
         wal.flush_and_sync().unwrap();
 
-        let reader = WalBlockReader::read(file_name).unwrap();
+        let reader = WalBlockReader::read(file.path()).unwrap();
         let mut iter = reader.into_iter();
         let mut result = Vec::new();
 
@@ -277,13 +281,12 @@ mod test {
     #[test]
     fn streaming_iterator() {
         let file = tempfile::NamedTempFile::new().unwrap();
-        let file_name = file.path().to_str().unwrap();
-        let mut wal = Wal::new(file_name).unwrap();
+        let mut wal = Wal::new(file.path()).unwrap();
         wal.write("vo pole bereza stoyala".as_bytes()).unwrap();
         wal.write("vo pole kudryavaya stoyala".as_bytes()).unwrap();
         wal.flush_and_sync().unwrap();
 
-        let reader = WalBlockReader::read(file_name).unwrap();
+        let reader = WalBlockReader::read(file.path()).unwrap();
         let mut iter = reader.into_iter();
         let mut result = Vec::new();
         loop {
@@ -308,9 +311,8 @@ mod test {
     #[test]
     fn corrupt_wal_log() -> Result<(), io::Error> {
         let file = tempfile::NamedTempFile::new()?;
-        let file_name = file.path().to_str().unwrap();
 
-        let mut wal = Wal::new(file_name)?;
+        let mut wal = Wal::new(file.path())?;
         wal.write("vo pole bereza stoyala".as_bytes())?;
         wal.write("vo pole kudryavaya stoyala".as_bytes())?;
         wal.flush_and_sync()?;
@@ -320,7 +322,7 @@ mod test {
         wal.write("small".as_bytes())?;
         wal.flush_and_sync()?;
 
-        let reader = WalBlockReader::read(file_name).unwrap();
+        let reader = WalBlockReader::read(file.path()).unwrap();
         let mut iter = reader.into_iter();
         let mut result = Vec::new();
         loop {
@@ -344,16 +346,15 @@ mod test {
     #[test]
     fn blocks_with_invalid_crc32_should_be_skipped() -> io::Result<()> {
         let file = tempfile::NamedTempFile::new()?;
-        let file_name = file.path().to_str().unwrap();
 
-        let mut wal = Wal::new(file_name)?;
+        let mut wal = Wal::new(file.path())?;
         wal.write("first".as_bytes())?;
         wal.write("second".as_bytes())?;
         wal.corrupt_last_block_crc32("second".as_bytes().len() as i64)?;
         wal.write("third".as_bytes())?;
         wal.flush_and_sync()?;
 
-        let reader = WalBlockReader::read(file_name).unwrap();
+        let reader = WalBlockReader::read(file.path()).unwrap();
         let mut iter = reader.into_iter();
         let mut result = Vec::new();
         loop {

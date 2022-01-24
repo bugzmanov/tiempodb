@@ -35,6 +35,13 @@ Ideas:
     * https://github.com/BurntSushi/cargo-benchcmp
     * https://docs.rs/dhat/latest/dhat/
 
+* Check alternatives for bytes arrays:
+    *  https://docs.rs/bstr/0.2.13/bstr/index.html
+    *  https://docs.rs/bytes/1.1.0/bytes/
+
+* Check low level networking (maybe):
+    * https://github.com/rust-lang/socket2
+
 
 Refs:
 * replication:

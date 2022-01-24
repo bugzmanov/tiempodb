@@ -1,7 +1,6 @@
 use crate::storage::DataPoint;
-use fail::{fail_point, FailScenario};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::io::Read;
@@ -13,11 +12,11 @@ use std::rc::Rc;
 
 #[inline]
 fn ignore_not_found(result: io::Result<()>) -> io::Result<()> {
-    return match result {
+    match result {
         ok @ Ok(_) => ok,
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
         err @ Err(_) => err,
-    };
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -81,9 +80,8 @@ struct PartitionWriter {
 impl PartitionWriter {
     pub fn write_partition(
         path: &Path,
-        data: &mut HashMap<Rc<str>, Vec<DataPoint>>, //todo: get rid of mut
+        data: &HashMap<Rc<str>, Vec<DataPoint>>,
     ) -> io::Result<Partition> {
-        // data.sort_by_key(|metric| metric.timestamp);
         let file = fs::OpenOptions::new().write(true).create(true).open(path)?;
 
         let zstd_level = zstd::compression_level_range()
@@ -97,7 +95,7 @@ impl PartitionWriter {
         let mut partition_start_time = 0;
         let mut partition_end_time = 0;
         for (metric_name, ref mut points) in data {
-            points.sort_by_key(|metric| metric.timestamp);
+            // points.sort_by_key(|metric| metric.timestamp);
             let mut meta = MetricsMeta::new(
                 metric_name.to_string(),
                 points.first().unwrap().timestamp,
@@ -215,12 +213,12 @@ impl PartitionManager {
         }
         if fs::try_exists(&data_file)? {
             // this is weird condition, should probably never happen
-            return Ok(true);
+            Ok(true)
         } else if fs::try_exists(&tmp_data_file)? {
             fs::rename(tmp_data_file, data_file)?;
-            return Ok(true);
+            Ok(true)
         } else {
-            return Ok(false);
+            Ok(false)
         }
     }
 
@@ -254,11 +252,11 @@ impl PartitionManager {
     }
 
     fn parse_file_name(file_name: &str) -> Option<(usize, &str)> {
-        if let [name, suffix] = file_name.split("_").collect::<Vec<&str>>().as_slice() {
+        if let [name, suffix] = file_name.split('_').collect::<Vec<&str>>().as_slice() {
             if *name != "partition" {
                 return None;
             }
-            if let [idx, ttype] = (*suffix).split(".").collect::<Vec<&str>>().as_slice() {
+            if let [idx, ttype] = (*suffix).split('.').collect::<Vec<&str>>().as_slice() {
                 (*idx)
                     .parse::<usize>()
                     .map_or(None, |idx_num| Some((idx_num, *ttype)))
@@ -272,7 +270,7 @@ impl PartitionManager {
 
     pub fn roll_new_partition(
         &mut self,
-        metrics: &mut HashMap<Rc<str>, Vec<DataPoint>>,
+        metrics: &HashMap<Rc<str>, Vec<DataPoint>>,
     ) -> io::Result<&Partition> {
         let next_partition_id = self.last_partition_id + 1;
         let tmp_partition_file = self.tmp_data_file(next_partition_id);
@@ -323,23 +321,13 @@ impl PartitionManager {
         let mut reader = io::BufReader::new(file);
         let mut data = Vec::with_capacity(file_size);
         reader.read_to_end(&mut data)?;
-        // String::from_utf8(data).map(|json_str| serde_json::from_str::<Partition>(&json_str))
+
         match String::from_utf8(data) {
             Ok(data_str) => match serde_json::from_str::<Partition>(&data_str) {
-                Ok(partition) => return Ok(partition),
-                Err(e) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("failed to parse json in {:?}", path.to_str()),
-                    ))
-                }
+                Ok(partition) => Ok(partition),
+                Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
             },
-            Err(e) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("failed to parse json in {:?}", path.to_str()),
-                ))
-            }
+            Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
         }
     }
 }
@@ -347,6 +335,9 @@ impl PartitionManager {
 #[cfg(test)]
 mod test {
     use claim::assert_none;
+    #[cfg(feature = "fail/failpoints")]
+    use fail::{fail_point, FailScenario};
+    use std::collections::{HashMap, HashSet};
 
     use super::*;
 
