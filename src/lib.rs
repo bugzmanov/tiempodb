@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 #![feature(path_try_exists)]
+
 mod ingest;
 pub mod partition;
 mod protocol;

@@ -1,4 +1,4 @@
-use std::io::{self, BufReader, Read, Seek};
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::{fs, io::Write};
 use streaming_iterator::StreamingIterator;
@@ -59,6 +59,11 @@ impl Wal {
         self.log.set_len(position)?;
         self.log.sync_all()?;
         Ok(())
+    }
+
+    pub fn log_position(&mut self) -> io::Result<u64> {
+        self.flush_and_sync()?;
+        self.log.seek(SeekFrom::Current(0))
     }
 
     #[cfg(test)]

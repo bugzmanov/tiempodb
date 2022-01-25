@@ -42,6 +42,8 @@ Ideas:
 * Check low level networking (maybe):
     * https://github.com/rust-lang/socket2
 
+* O_DIRECT for wall log
+
 
 Refs:
 * replication:

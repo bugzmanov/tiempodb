@@ -7,6 +7,7 @@ use crate::storage::Storage;
 use crate::wal::Wal;
 use crate::wal::WalBlockReader;
 use crossbeam::channel;
+use crossbeam::channel::SendError;
 use crossbeam::channel::{bounded, RecvError, TryRecvError};
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -16,11 +17,34 @@ use std::rc::Rc;
 use std::sync::Arc;
 use streaming_iterator::StreamingIterator;
 
+struct SnapshotProgress {
+    inbox: channel::Receiver<usize>,
+    outbox: channel::Sender<usize>,
+}
+
+impl SnapshotProgress {
+    fn new(inbox: channel::Receiver<usize>, outbox: channel::Sender<usize>) -> Self {
+        SnapshotProgress { inbox, outbox }
+    }
+
+    fn persist_snapshot(&mut self, wall_log_position: usize) -> Result<(), SendError<usize>> {
+        self.outbox.send(wall_log_position)
+    }
+
+    fn can_truncate_wal(&mut self) -> Result<Option<usize>, TryRecvError> {
+        match self.inbox.try_recv() {
+            Ok(usize) => Ok(Some(usize)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
+
 struct Engine {
     storage: SnaphotableStorage,
     metrics_cache: HashMap<String, Rc<str>>,
     wal: Wal,
-    partition_manager: PartitionManager,
+    snapshot_progress: SnapshotProgress,
 }
 
 impl Engine {
@@ -29,22 +53,47 @@ impl Engine {
         wal_path: &Path,
         partitions_path: &Path,
     ) -> io::Result<Self> {
+        let (tasks_sender, tasks_receiver) = crossbeam::channel::unbounded();
+        let (results_sender, results_receiver) = crossbeam::channel::unbounded();
+
+        let manager = PartitionManager::new(partitions_path)?;
+        let worker = PartitionWorker::new(
+            tasks_receiver,
+            results_sender,
+            manager,
+            storage.share_snapshot(),
+        );
+
+        // #[cfg(not(test))]
+        // std::thread::spawn(move || worker.run());
+
+        let snapshot_progress = SnapshotProgress::new(results_receiver, tasks_sender);
+
         Ok(Engine {
             storage,
             metrics_cache: HashMap::new(),
             wal: Wal::new(wal_path)?,
-            partition_manager: PartitionManager::new(partitions_path)?,
+            snapshot_progress,
         })
     }
 
     //todo: ingest multi-line
     pub fn ingest(&mut self, line_str: &str) -> io::Result<()> {
+        if let Ok(Some(pos)) = self.snapshot_progress.can_truncate_wal() {
+            self.wal.truncate(pos as u64)?; //todo: usize vs u64
+        }
         self.wal.write(line_str.as_bytes())?;
         self.save_to_storage(line_str);
-        // if self.storage.active_set_size() > 10 {
-        //     self.storage.make_snapshot();
-        //     self.partition_manager.roll_new_partition();
-        // }
+        if self.storage.active_set_size() > 10 {
+            self.storage.make_snapshot();
+            let wal_position = self.wal.log_position()?;
+            if let Err(e) = self
+                .snapshot_progress
+                .persist_snapshot(wal_position as usize)
+            {
+                todo!("unhandled communication error");
+            }
+        }
         Ok(())
     }
 
@@ -71,12 +120,7 @@ impl Engine {
         partitions_path: &Path,
     ) -> io::Result<Self> {
         let mut iter = WalBlockReader::read(wal_path)?.into_iter();
-        let mut storage = Engine {
-            storage,
-            metrics_cache: HashMap::new(),
-            wal: Wal::new(wal_path)?, //todo: seek to the end
-            partition_manager: PartitionManager::new(partitions_path)?,
-        };
+        let mut storage = Engine::new(storage, wal_path, partitions_path)?;
         loop {
             iter.advance();
             match iter.get() {
@@ -106,6 +150,20 @@ struct PartitionWorker {
 }
 
 impl PartitionWorker {
+    fn new(
+        inbox: channel::Receiver<usize>,
+        outbox: channel::Sender<usize>,
+        partition_manager: PartitionManager,
+        snapshot: Arc<RwLock<HashMap<Rc<str>, Vec<DataPoint>>>>,
+    ) -> Self {
+        PartitionWorker {
+            inbox,
+            outbox,
+            partition_manager,
+            snapshot,
+        }
+    }
+
     pub fn run(&mut self) {
         while self.tick() {}
     }
@@ -132,8 +190,9 @@ impl PartitionWorker {
 
 #[cfg(test)]
 mod test {
-    use super::*;
+    use std::io::BufRead;
 
+    use super::*;
     #[test]
     fn simple_test() -> io::Result<()> {
         let file = tempfile::NamedTempFile::new().unwrap();
@@ -147,11 +206,11 @@ mod test {
         let line2_str =
             "weather,location=us-midwest,country=us temperature=2,humidity=3 1465839830100400201";
         engine.ingest(&line2_str)?;
-        let metrics = engine.storage.load_unsafe("weather:temperature");
+        let metrics = engine.storage.load_locked("weather:temperature");
 
         assert_eq!(
             metrics
-                .into_iter()
+                .iter()
                 .map(|m| (m.value, m.timestamp))
                 .collect::<Vec<(i64, u64)>>(),
             vec![(0, 1465839830100400200), (2, 1465839830100400201)]
@@ -176,11 +235,11 @@ mod test {
         storage = storage::SnaphotableStorage::new();
         engine = Engine::restore_from_wal(storage, file.path(), tempdir.path())?;
 
-        let metrics = engine.storage.load_unsafe("weather:temperature");
+        let metrics = engine.storage.load_locked("weather:temperature");
 
         assert_eq!(
             metrics
-                .into_iter()
+                .iter()
                 .map(|m| (m.value, m.timestamp))
                 .collect::<Vec<(i64, u64)>>(),
             vec![(0, 1465839830100400200), (2, 1465839830100400201)]
@@ -207,15 +266,16 @@ mod test {
         let storage = storage::SnaphotableStorage::new();
         let mut engine = Engine::restore_from_wal(storage, file.path(), tempdir.path())?;
 
-        let metrics = engine.storage.load_unsafe("weather:temperature");
+        let metrics = engine.storage.load_locked("weather:temperature");
 
         assert_eq!(
             metrics
-                .into_iter()
+                .iter()
                 .map(|m| (m.value, m.timestamp))
                 .collect::<Vec<(i64, u64)>>(),
             vec![(0, 1465839830100400200)]
         );
+        drop(metrics);
 
         let line2_str = "weather,location=us-midwest,country=us temperature=4 1465839830100400202";
         engine.ingest(&line2_str)?;
@@ -224,15 +284,16 @@ mod test {
         let storage = storage::SnaphotableStorage::new();
         let mut engine = Engine::restore_from_wal(storage, file.path(), tempdir.path())?;
 
-        let metrics = engine.storage.load_unsafe("weather:temperature");
+        let metrics = engine.storage.load_locked("weather:temperature");
 
         assert_eq!(
             metrics
-                .into_iter()
+                .iter()
                 .map(|m| (m.value, m.timestamp))
                 .collect::<Vec<(i64, u64)>>(),
             vec![(0, 1465839830100400200), (4, 1465839830100400202)]
         );
+        drop(metrics);
 
         engine.ingest(&line2_str)?;
         Ok(())
