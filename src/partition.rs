@@ -8,7 +8,7 @@ use std::io::Seek;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
 
 #[inline]
 fn ignore_not_found(result: io::Result<()>) -> io::Result<()> {
@@ -80,7 +80,7 @@ struct PartitionWriter {
 impl PartitionWriter {
     pub fn write_partition(
         path: &Path,
-        data: &HashMap<Rc<str>, Vec<DataPoint>>,
+        data: &HashMap<Arc<str>, Vec<DataPoint>>,
     ) -> io::Result<Partition> {
         let file = fs::OpenOptions::new().write(true).create(true).open(path)?;
 
@@ -128,9 +128,7 @@ impl PartitionReader {
     pub fn read_partition(
         path: &Path,
         partition: &Partition,
-    ) -> io::Result<HashMap<Rc<str>, Vec<DataPoint>>> {
-        // data.sort_by_key(|metric| metric.timestamp);
-        dbg!(path);
+    ) -> io::Result<HashMap<Arc<str>, Vec<DataPoint>>> {
         let file = fs::OpenOptions::new()
             .read(true)
             .write(false)
@@ -144,12 +142,11 @@ impl PartitionReader {
 
         let mut result = HashMap::new();
         for metric_meta in partition.metrics.iter() {
-            let name: Rc<str> = Rc::from(metric_meta.metric_name.as_str());
+            let name: Arc<str> = Arc::from(metric_meta.metric_name.as_str());
             let mut metrics = Vec::with_capacity(metric_meta.size);
             if buf.capacity() < metric_meta.uncompressed_size as usize {
                 buf = vec![0; metric_meta.uncompressed_size as usize];
             }
-            dbg!(buf.capacity());
 
             buf_reader.read_exact(&mut buf)?;
             for point in buf.chunks(16) {
@@ -167,7 +164,7 @@ impl PartitionReader {
 
 pub struct PartitionManager {
     pub partitions_dir: PathBuf,
-    pub last_partition_id: usize,
+    pub last_partition_id: usize, //todo: overflows
     pub partitions: Vec<Partition>,
 }
 
@@ -270,7 +267,7 @@ impl PartitionManager {
 
     pub fn roll_new_partition(
         &mut self,
-        metrics: &HashMap<Rc<str>, Vec<DataPoint>>,
+        metrics: &HashMap<Arc<str>, Vec<DataPoint>>,
     ) -> io::Result<&Partition> {
         let next_partition_id = self.last_partition_id + 1;
         let tmp_partition_file = self.tmp_data_file(next_partition_id);
@@ -341,19 +338,19 @@ mod test {
 
     use super::*;
 
-    fn generate_metric(metric_name: &str) -> HashMap<Rc<str>, Vec<DataPoint>> {
+    fn generate_metric(metric_name: &str) -> HashMap<Arc<str>, Vec<DataPoint>> {
         let mut data = HashMap::new();
-        let metric_name: Rc<str> = Rc::from(metric_name);
+        let metric_name: Arc<str> = Arc::from(metric_name);
         data.insert(
             metric_name.clone(),
             vec![DataPoint::new(metric_name.clone(), 100u64, 200i64)],
         );
         data
     }
-    fn generate_metrics_batch(metric_suffix: &str) -> HashMap<Rc<str>, Vec<DataPoint>> {
+    fn generate_metrics_batch(metric_suffix: &str) -> HashMap<Arc<str>, Vec<DataPoint>> {
         let mut data = HashMap::new();
         (0..10).for_each(|metric_idx| {
-            let metric_name: Rc<str> = Rc::from(format!("metric_{metric_suffix}_{metric_idx}"));
+            let metric_name: Arc<str> = Arc::from(format!("metric_{metric_suffix}_{metric_idx}"));
             data.insert(
                 metric_name.clone(),
                 (0..10)

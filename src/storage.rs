@@ -5,21 +5,20 @@ use parking_lot::lock_api::RawRwLock;
 use parking_lot::RwLock;
 use rand::Rng;
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::sync::Arc;
 
 struct FakeRc;
 
-impl Dummy<FakeRc> for Rc<str> {
-    fn dummy_with_rng<R: Rng + ?Sized>(_: &FakeRc, rng: &mut R) -> Rc<str> {
-        Rc::from(format!("timeseries_{}", rng.gen::<u32>()))
+impl Dummy<FakeRc> for Arc<str> {
+    fn dummy_with_rng<R: Rng + ?Sized>(_: &FakeRc, rng: &mut R) -> Arc<str> {
+        Arc::from(format!("timeseries_{}", rng.gen::<u32>()))
     }
 }
 
 #[derive(Clone, Debug, Eq, Dummy)]
 pub struct DataPoint {
     #[dummy(faker = "FakeRc")]
-    pub name: Rc<str>,
+    pub name: Arc<str>,
     pub timestamp: u64,
     pub value: i64,
 }
@@ -27,7 +26,7 @@ pub struct DataPoint {
 struct VecHold<'a>(Vec<&'a DataPoint>);
 
 impl DataPoint {
-    pub fn new(name: Rc<str>, timestamp: u64, value: i64) -> Self {
+    pub fn new(name: Arc<str>, timestamp: u64, value: i64) -> Self {
         DataPoint {
             name,
             timestamp,
@@ -61,7 +60,7 @@ impl<'a> std::ops::Deref for VecHold<'a> {
     }
 }
 
-impl Storage for HashMap<Rc<str>, Vec<DataPoint>> {
+impl Storage for HashMap<Arc<str>, Vec<DataPoint>> {
     fn add(&mut self, point: DataPoint) {
         if let Some(values) = self.get_mut(&point.name) {
             values.push(point);
@@ -126,10 +125,13 @@ impl Storage for HashMap<Rc<str>, Vec<DataPoint>> {
 #[derive(Default)]
 pub struct MemoryStorage {
     stat: StorageStat,
-    map: HashMap<Rc<str>, Vec<DataPoint>>,
+    map: HashMap<Arc<str>, Vec<DataPoint>>,
 }
 
-fn create_for_key<'a, T: Default>(map: &'a mut HashMap<Rc<str>, T>, key: &'_ Rc<str>) -> &'a mut T {
+fn create_for_key<'a, T: Default>(
+    map: &'a mut HashMap<Arc<str>, T>,
+    key: &'_ Arc<str>,
+) -> &'a mut T {
     map.insert(key.clone(), T::default());
     map.get_mut(key).expect("getting after insert")
 }
@@ -178,7 +180,7 @@ impl Storage for MemoryStorage {
 
 #[derive(Default)]
 pub struct SnaphotableStorage {
-    snapshot: Arc<RwLock<HashMap<Rc<str>, Vec<DataPoint>>>>,
+    snapshot: Arc<RwLock<HashMap<Arc<str>, Vec<DataPoint>>>>,
     active: MemoryStorage,
 }
 
@@ -222,11 +224,11 @@ impl SnaphotableStorage {
         let _ = std::mem::replace(&mut *write, curr.map);
     }
 
-    pub fn snapshot(&self) -> parking_lot::RwLockReadGuard<'_, HashMap<Rc<str>, Vec<DataPoint>>> {
+    pub fn snapshot(&self) -> parking_lot::RwLockReadGuard<'_, HashMap<Arc<str>, Vec<DataPoint>>> {
         self.snapshot.read()
     }
 
-    pub fn share_snapshot(&self) -> Arc<RwLock<HashMap<Rc<str>, Vec<DataPoint>>>> {
+    pub fn share_snapshot(&self) -> Arc<RwLock<HashMap<Arc<str>, Vec<DataPoint>>>> {
         self.snapshot.clone()
     }
 
@@ -388,7 +390,7 @@ mod test {
 
     fn data_point(metric: &str) -> DataPoint {
         let mut point = Faker.fake::<DataPoint>();
-        point.name = Rc::from(metric);
+        point.name = Arc::from(metric);
         point
     }
 
@@ -467,7 +469,7 @@ mod test {
 
     fn generate_data_points(metric_name: &str, size: usize) -> Vec<DataPoint> {
         let mut data_points = fake::vec![DataPoint; size];
-        let metric: Rc<str> = Rc::from(metric_name);
+        let metric: Arc<str> = Arc::from(metric_name);
         for point in &mut data_points {
             point.name = metric.clone();
         }

@@ -13,7 +13,6 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
-use std::rc::Rc;
 use std::sync::Arc;
 use streaming_iterator::StreamingIterator;
 
@@ -42,9 +41,12 @@ impl SnapshotProgress {
 
 struct Engine {
     storage: SnaphotableStorage,
-    metrics_cache: HashMap<String, Rc<str>>,
+    metrics_cache: HashMap<String, Arc<str>>,
     wal: Wal,
     snapshot_progress: SnapshotProgress,
+    snapshot_wal_position: usize,
+    #[cfg(test)]
+    worker: PartitionWorker,
 }
 
 impl Engine {
@@ -57,42 +59,51 @@ impl Engine {
         let (results_sender, results_receiver) = crossbeam::channel::unbounded();
 
         let manager = PartitionManager::new(partitions_path)?;
-        let worker = PartitionWorker::new(
+        let mut worker = PartitionWorker::new(
             tasks_receiver,
             results_sender,
             manager,
             storage.share_snapshot(),
         );
 
-        // #[cfg(not(test))]
-        // std::thread::spawn(move || worker.run());
+        #[cfg(not(test))]
+        std::thread::spawn(move || worker.run());
 
         let snapshot_progress = SnapshotProgress::new(results_receiver, tasks_sender);
+        let snapshot_wal_position = 0usize;
 
         Ok(Engine {
             storage,
             metrics_cache: HashMap::new(),
             wal: Wal::new(wal_path)?,
             snapshot_progress,
+            snapshot_wal_position,
+            #[cfg(test)]
+            worker,
         })
     }
 
     //todo: ingest multi-line
     pub fn ingest(&mut self, line_str: &str) -> io::Result<()> {
-        if let Ok(Some(pos)) = self.snapshot_progress.can_truncate_wal() {
-            self.wal.truncate(pos as u64)?; //todo: usize vs u64
-        }
         self.wal.write(line_str.as_bytes())?;
         self.save_to_storage(line_str);
         if self.storage.active_set_size() > 10 {
             self.storage.make_snapshot();
-            let wal_position = self.wal.log_position()?;
             if let Err(e) = self
                 .snapshot_progress
-                .persist_snapshot(wal_position as usize)
+                .persist_snapshot(self.snapshot_wal_position)
             {
                 todo!("unhandled communication error");
+            } else {
+                // self.snapshot_wal_position = self.wal.log_position()?;
+                self.snapshot_wal_position = self.wal.roll_new_segment()? as usize;
             }
+            #[cfg(test)]
+            assert!(self.worker.tick());
+        }
+        if let Ok(Some(pos)) = self.snapshot_progress.can_truncate_wal() {
+            // dbg!(format!("truncate! {}", pos));
+            self.wal.drop_pending(pos as u64)?; //todo: usize vs u64
         }
         Ok(())
     }
@@ -105,7 +116,7 @@ impl Engine {
                     let rc_name = self
                         .metrics_cache
                         .entry(name.clone())
-                        .or_insert_with(|| Rc::from(name));
+                        .or_insert_with(|| Arc::from(name));
                     let data_point =
                         storage::DataPoint::new(rc_name.clone(), line.timestamp, int_value);
                     self.storage.add(data_point);
@@ -133,7 +144,6 @@ impl Engine {
                 None => break,
             }
         }
-        dbg!(iter.last_successfull_read_position());
         storage
             .wal
             .truncate(iter.last_successfull_read_position())?;
@@ -146,7 +156,7 @@ struct PartitionWorker {
     inbox: channel::Receiver<usize>,
     outbox: channel::Sender<usize>,
     partition_manager: PartitionManager,
-    snapshot: Arc<RwLock<HashMap<Rc<str>, Vec<DataPoint>>>>,
+    snapshot: Arc<RwLock<HashMap<Arc<str>, Vec<DataPoint>>>>,
 }
 
 impl PartitionWorker {
@@ -154,7 +164,7 @@ impl PartitionWorker {
         inbox: channel::Receiver<usize>,
         outbox: channel::Sender<usize>,
         partition_manager: PartitionManager,
-        snapshot: Arc<RwLock<HashMap<Rc<str>, Vec<DataPoint>>>>,
+        snapshot: Arc<RwLock<HashMap<Arc<str>, Vec<DataPoint>>>>,
     ) -> Self {
         PartitionWorker {
             inbox,
@@ -296,6 +306,33 @@ mod test {
         drop(metrics);
 
         engine.ingest(&line2_str)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_partition_roll() -> io::Result<()> {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let tempdir = tempfile::tempdir().unwrap();
+
+        let mut storage = storage::SnaphotableStorage::new();
+        let mut engine = Engine::new(storage, file.path(), tempdir.path())?;
+
+        for i in 0..10 {
+            let line_str = format!(
+                "weather,location=us-midwest,country=us humidity={i} 146583983010040020{i}"
+            );
+            engine.ingest(&line_str)?;
+            assert_eq!(engine.worker.partition_manager.partitions.len(), 0);
+        }
+
+        let line_str =
+            format!("weather,location=us-midwest,country=us humidity=10 1465839830100400210");
+        engine.ingest(&line_str)?;
+        // engine.ingest(&line_str)?;
+        // assert_eq!(engine.worker.partition_manager.partitions.len(), 1);
+
+        // assert_eq!(engine.wal.log_position()?, 0);
+
         Ok(())
     }
 }

@@ -4,6 +4,7 @@ use std::{fs, io::Write};
 use streaming_iterator::StreamingIterator;
 
 pub struct Wal {
+    file_name: PathBuf,
     log: fs::File,
     dirty_bytes: usize,
 }
@@ -18,6 +19,7 @@ impl Wal {
             .write(true)
             .open(path)?;
         Ok(Wal {
+            file_name: path.to_path_buf(),
             log,
             dirty_bytes: 0,
         })
@@ -82,6 +84,29 @@ impl Wal {
         self.log.seek(io::SeekFrom::End(0))?;
         self.log.flush()?;
         self.log.sync_all()?;
+        Ok(())
+    }
+
+    pub fn roll_new_segment(&mut self) -> io::Result<u64> {
+        //todo: check if pending exists
+        let log_position = self.log_position()?;
+        let file_name: String = self.file_name.to_str().unwrap().to_string(); // todo: unwrap
+        dbg!(format!("{file_name}.pending_{log_position}"));
+        fs::rename(
+            &self.file_name,
+            format!("{file_name}.pending_{log_position}"),
+        )
+        .unwrap();
+        self.log = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&self.file_name)?;
+        Ok(log_position)
+    }
+
+    pub fn drop_pending(&mut self, position: u64) -> io::Result<()> {
+        fs::remove_file(self.file_name.join(".pending_{position}"))?;
         Ok(())
     }
 }
@@ -217,7 +242,6 @@ impl WalBlockIterator {
         match self.link.log_position() {
             //todo create macro to handle Err
             Ok(position) => {
-                dbg!(position);
                 self.last_successfull_read_position = position;
             }
             Err(e) => {
