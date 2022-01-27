@@ -19,27 +19,46 @@ use streaming_iterator::StreamingIterator;
 struct SnapshotProgress {
     inbox: channel::Receiver<usize>,
     outbox: channel::Sender<usize>,
+    pending: bool,
 }
 
 impl SnapshotProgress {
     fn new(inbox: channel::Receiver<usize>, outbox: channel::Sender<usize>) -> Self {
-        SnapshotProgress { inbox, outbox }
+        SnapshotProgress {
+            inbox,
+            outbox,
+            pending: false,
+        }
     }
 
-    fn persist_snapshot(&mut self, wall_log_position: usize) -> Result<(), SendError<usize>> {
-        self.outbox.send(wall_log_position)
+    fn persist_snapshot(
+        &mut self,
+        wall_log_position: usize,
+        storage: &mut SnaphotableStorage,
+    ) -> Result<bool, SendError<usize>> {
+        if (self.pending) {
+            Ok(false)
+        } else {
+            storage.make_snapshot();
+            self.outbox.send(wall_log_position)?;
+            self.pending = true;
+            Ok(true)
+        }
     }
 
     fn can_truncate_wal(&mut self) -> Result<Option<usize>, TryRecvError> {
         match self.inbox.try_recv() {
-            Ok(usize) => Ok(Some(usize)),
+            Ok(usize) => {
+                self.pending = false;
+                Ok(Some(usize))
+            }
             Err(TryRecvError::Empty) => Ok(None),
             Err(e) => Err(e),
         }
     }
 }
 
-struct Engine {
+pub struct Engine {
     storage: SnaphotableStorage,
     metrics_cache: HashMap<String, Arc<str>>,
     wal: Wal,
@@ -87,22 +106,25 @@ impl Engine {
     pub fn ingest(&mut self, line_str: &str) -> io::Result<()> {
         self.wal.write(line_str.as_bytes())?;
         self.save_to_storage(line_str);
-        if self.storage.active_set_size() > 10 {
-            self.storage.make_snapshot();
-            if let Err(e) = self
+        //todo: hardcoded value for now
+        if self.storage.active_set_size() > 100 {
+            match self
                 .snapshot_progress
-                .persist_snapshot(self.snapshot_wal_position)
+                .persist_snapshot(self.snapshot_wal_position, &mut self.storage)
             {
-                todo!("unhandled communication error");
-            } else {
-                // self.snapshot_wal_position = self.wal.log_position()?;
-                self.snapshot_wal_position = self.wal.roll_new_segment()? as usize;
+                Ok(false) => {} /* do nothing */
+                Ok(true) => {
+                    self.snapshot_wal_position =
+                        self.wal.roll_new_segment(self.snapshot_wal_position)? as usize;
+                    #[cfg(test)]
+                    assert!(self.worker.tick());
+                }
+                Err(e) => {
+                    todo!("unimplemented")
+                }
             }
-            #[cfg(test)]
-            assert!(self.worker.tick());
         }
         if let Ok(Some(pos)) = self.snapshot_progress.can_truncate_wal() {
-            // dbg!(format!("truncate! {}", pos));
             self.wal.drop_pending(pos as u64)?; //todo: usize vs u64
         }
         Ok(())
@@ -174,8 +196,10 @@ impl PartitionWorker {
         }
     }
 
+    #[cfg(not(test))]
     pub fn run(&mut self) {
         while self.tick() {}
+        log::info!("PartitionWorker shutdown, because inbox channel became disconnected")
     }
 
     fn tick(&mut self) -> bool {
@@ -188,7 +212,11 @@ impl PartitionWorker {
                 }
                 true
             }
-            Err(e) => todo!("handle failure"),
+            Err(e) => {
+                dbg!(e);
+                false
+                // todo!("handle failure")
+            }
         }
     }
 
@@ -314,7 +342,7 @@ mod test {
         let file = tempfile::NamedTempFile::new().unwrap();
         let tempdir = tempfile::tempdir().unwrap();
 
-        let mut storage = storage::SnaphotableStorage::new();
+        let storage = storage::SnaphotableStorage::new();
         let mut engine = Engine::new(storage, file.path(), tempdir.path())?;
 
         for i in 0..10 {
@@ -328,10 +356,10 @@ mod test {
         let line_str =
             format!("weather,location=us-midwest,country=us humidity=10 1465839830100400210");
         engine.ingest(&line_str)?;
-        // engine.ingest(&line_str)?;
-        // assert_eq!(engine.worker.partition_manager.partitions.len(), 1);
 
-        // assert_eq!(engine.wal.log_position()?, 0);
+        assert_eq!(engine.worker.partition_manager.partitions.len(), 1);
+
+        assert_eq!(engine.wal.log_position()?, 0);
 
         Ok(())
     }

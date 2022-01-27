@@ -87,14 +87,14 @@ impl Wal {
         Ok(())
     }
 
-    pub fn roll_new_segment(&mut self) -> io::Result<u64> {
+    pub fn roll_new_segment(&mut self, log_position: usize) -> io::Result<u64> {
         //todo: check if pending exists
-        let log_position = self.log_position()?;
-        let file_name: String = self.file_name.to_str().unwrap().to_string(); // todo: unwrap
-        dbg!(format!("{file_name}.pending_{log_position}"));
+        self.flush_and_sync()?;
+        let file_name: String = self.filename();
+        let new_log_position = self.log_position()?;
         fs::rename(
             &self.file_name,
-            format!("{file_name}.pending_{log_position}"),
+            dbg!(format!("{file_name}.pending_{log_position}")),
         )
         .unwrap();
         self.log = fs::OpenOptions::new()
@@ -102,11 +102,15 @@ impl Wal {
             .read(true)
             .write(true)
             .open(&self.file_name)?;
-        Ok(log_position)
+        Ok(new_log_position)
     }
 
+    fn filename(&self) -> String {
+        self.file_name.to_str().unwrap().to_string() //todo: unwrap
+    }
     pub fn drop_pending(&mut self, position: u64) -> io::Result<()> {
-        fs::remove_file(self.file_name.join(".pending_{position}"))?;
+        let filename = self.filename();
+        fs::remove_file(dbg!(format!("{filename}.pending_{position}")))?;
         Ok(())
     }
 }
