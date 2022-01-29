@@ -12,7 +12,7 @@ mod test {
     #[test]
     fn sql_parse() {
         let query = dbg!(sqlparser::SelectStatementParser::new().parse(
-            r#"SELECT "field_a", max("field_b") FROM "table_1" WHERE "field_a" = "field_b" AND "field_b" = "ololo""#
+            r#"SELECT "field_a", max("field_b") FROM "table_1" WHERE "field_a" = "field_b" AND "field_b" = "ololo" AND "field_a" =~ /^America$/"#
         ))
         .unwrap();
         assert_eq!(query.from, "table_1");
@@ -36,6 +36,11 @@ mod test {
                     "field_b".to_string(),
                     ComparisonType::Eq,
                     "ololo".to_string()
+                ),
+                Condition::new(
+                    "field_a".to_string(),
+                    ComparisonType::Like,
+                    "/^America$/".to_string()
                 ),
             ],
         );

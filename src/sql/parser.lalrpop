@@ -62,6 +62,10 @@ Identifier:String = {
     r#"'\w+'"# => <>.replace("\'",""),
 }
 
+RegExpValue: &'input str = {
+    r#"/.+/"# => <>
+}
+
 SelectionFunction: SelectionType = {
     "bottom" => SelectionType::Bottom,
     "first" => SelectionType::First,
@@ -94,25 +98,51 @@ Field: FieldProjection = {
 
 Fields = Comma<Field>;
 
+Comparison: ComparisonType = {
+    EQ => ComparisonType::Eq,
+    NEQ => ComparisonType::NotEq,
+    GT => ComparisonType::Gt,
+    LT => ComparisonType::Lt
+}
+
+RegExpComparison: ComparisonType = {
+    LIKE => ComparisonType::Like,
+    NOT_LIKE => ComparisonType::NotLike,
+}
+
+//todo the right side is not identifier
 Condition: Condition = {
-    <source: Identifier> EQ <value: Identifier> => Condition {
+    <source: Identifier> <op: Comparison> <value: Identifier> => Condition {
         source: source,
-        comparison: ComparisonType::Eq,
+        comparison: op,
         value: value
+    },
+
+    <source: Identifier> <op: RegExpComparison> <value: RegExpValue> => Condition {
+        source: source,
+        comparison: op,
+        value: value.to_string()
     }
 }
 
 Conditions = And<Condition>;
 
+Limit: Option<String> = {
+    "LIMIT" <points_num: Num> => {
+        Some(points_num.to_string())
+    },
+    ! => None
+}
+
 // expressions
 pub SelectStatement: SelectQuery = {
-    SELECT <fields: Fields> FROM <tablename: Identifier> => SelectQuery {
+    SELECT <fields: Fields> FROM <tablename: Identifier> <limit: Limit> => SelectQuery {
       from: tablename.to_string(),
       fields: fields,
       group_by: Vec::new(),
       where_constraints: Vec::new(),
       order_by_time: OrderDirection::Asc,
-      limit: None,
+      limit: limit.map(|numstr| u32::from_str(&numstr).unwrap()),
       slimit: None
     },
 
