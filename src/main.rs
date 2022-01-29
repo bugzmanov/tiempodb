@@ -4,6 +4,7 @@
 mod ingest;
 mod partition;
 mod protocol;
+mod sql;
 mod storage;
 mod wal;
 

@@ -464,7 +464,10 @@ mod test {
         assert_eq!(read_guard.len(), 4);
 
         drop(read_guard);
-        assert_some!(storage.snapshot.try_write());
+
+        // #[allow(unused_must_use)]
+        let rw_lock = storage.snapshot.try_write();
+        assert_some!(&rw_lock);
     }
 
     fn generate_data_points(metric_name: &str, size: usize) -> Vec<DataPoint> {

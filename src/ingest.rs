@@ -8,7 +8,7 @@ use crate::wal::Wal;
 use crate::wal::WalBlockReader;
 use crossbeam::channel;
 use crossbeam::channel::SendError;
-use crossbeam::channel::{bounded, RecvError, TryRecvError};
+use crossbeam::channel::TryRecvError;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::io;
@@ -36,7 +36,7 @@ impl SnapshotProgress {
         wall_log_position: usize,
         storage: &mut SnaphotableStorage,
     ) -> Result<bool, SendError<usize>> {
-        if (self.pending) {
+        if self.pending {
             Ok(false)
         } else {
             storage.make_snapshot();
@@ -78,6 +78,8 @@ impl Engine {
         let (results_sender, results_receiver) = crossbeam::channel::unbounded();
 
         let manager = PartitionManager::new(partitions_path)?;
+
+        #[allow(unused_mut)]
         let mut worker = PartitionWorker::new(
             tasks_receiver,
             results_sender,
@@ -290,7 +292,7 @@ mod test {
         let file = tempfile::NamedTempFile::new().unwrap();
         let tempdir = tempfile::tempdir().unwrap();
 
-        let mut storage = storage::SnaphotableStorage::new();
+        let storage = storage::SnaphotableStorage::new();
         let mut engine = Engine::new(storage, file.path(), tempdir.path())?;
         let line_str =
             "weather,location=us-midwest,country=us temperature=0,humidity=1 1465839830100400200";
@@ -334,33 +336,6 @@ mod test {
         drop(metrics);
 
         engine.ingest(&line2_str)?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_partition_roll() -> io::Result<()> {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        let tempdir = tempfile::tempdir().unwrap();
-
-        let storage = storage::SnaphotableStorage::new();
-        let mut engine = Engine::new(storage, file.path(), tempdir.path())?;
-
-        for i in 0..10 {
-            let line_str = format!(
-                "weather,location=us-midwest,country=us humidity={i} 146583983010040020{i}"
-            );
-            engine.ingest(&line_str)?;
-            assert_eq!(engine.worker.partition_manager.partitions.len(), 0);
-        }
-
-        let line_str =
-            format!("weather,location=us-midwest,country=us humidity=10 1465839830100400210");
-        engine.ingest(&line_str)?;
-
-        assert_eq!(engine.worker.partition_manager.partitions.len(), 1);
-
-        assert_eq!(engine.wal.log_position()?, 0);
-
         Ok(())
     }
 }

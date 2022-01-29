@@ -1,0 +1,129 @@
+use crate::sql::ast::*;
+use std::str::FromStr;
+
+grammar;
+
+/// operators
+EQ: &'input str = "=" => <>;
+NEQ: &'input str = "<>" => <>;
+GT: &'input str = ">" => <>;
+LT: &'input str = "<" => <>;
+LIKE: &'input str = "=~" => <>;
+NOT_LIKE: &'input str = "!=~" => <>;
+
+/// keywords
+SELECT: &'input str = "SELECT" => <>;
+FROM: &'input str = "FROM" => <>;
+WHERE: &'input str = "WHERE" => <>;
+
+pub Term: i32 = {
+    <n:Num> => n,
+    "(" <t:Term> ")" => t,
+};
+
+Num: i32 = <s:r"[0-9]+"> => i32::from_str(s).unwrap();
+
+/// seperators
+Comma<T>: Vec<T> = {
+    <mut v:(<T> ",")*> <e:T?> => match e {
+        None=> v,
+        Some(e) => {
+            v.push(e);
+            v
+        }
+    }
+};
+
+Semicolon<T>: Vec<T> = {
+    <mut v:(<T> ";")*> <e:T?> => match e {
+        None=> v,
+        Some(e) => {
+            v.push(e);
+            v
+        }
+    }
+};
+
+And<T>: Vec<T> = {
+    <mut v:(<T> " AND ")*> <e:T?> => match e {
+        None=> v,
+        Some(e) => {
+            v.push(e);
+            v
+        }
+    }
+}
+
+// statement parts
+
+Identifier:String = {
+    r"[a-zA-Z][a-zA-Z0-9]*" => <>.to_string(),
+    r#""\w+""# => <>.replace("\"",""),
+    r#"'\w+'"# => <>.replace("\'",""),
+}
+
+SelectionFunction: SelectionType = {
+    "bottom" => SelectionType::Bottom,
+    "first" => SelectionType::First,
+    "last" => SelectionType::Last,
+    "max" => SelectionType::Max,
+    "min" => SelectionType::Min,
+    "count" => SelectionType::Count,
+    "distinct" => SelectionType::Distinct,
+    "integral" => SelectionType::Integral,
+    "mean" => SelectionType::Mean,
+    "median" => SelectionType::Median,
+    "mod" => SelectionType::Mod,
+    "sum" => SelectionType::Sum,
+    //todo percentile
+    // r"" => SelectionType::,
+    // r"" => SelectionType::,
+}
+
+Field: FieldProjection = {
+    <func: SelectionFunction> "(" <id: Identifier> ")" => FieldProjection {
+        field_name: id.to_string(),
+        selection_type: func
+    },
+
+    <id: Identifier> => FieldProjection {
+        selection_type: SelectionType::Identity,
+        field_name: id.to_string()
+    }
+}
+
+Fields = Comma<Field>;
+
+Condition: Condition = {
+    <source: Identifier> EQ <value: Identifier> => Condition {
+        source: source,
+        comparison: ComparisonType::Eq,
+        value: value
+    }
+}
+
+Conditions = And<Condition>;
+
+// expressions
+pub SelectStatement: SelectQuery = {
+    SELECT <fields: Fields> FROM <tablename: Identifier> => SelectQuery {
+      from: tablename.to_string(),
+      fields: fields,
+      group_by: Vec::new(),
+      where_constraints: Vec::new(),
+      order_by_time: OrderDirection::Asc,
+      limit: None,
+      slimit: None
+    },
+
+    SELECT <fields: Fields> FROM <tablename: Identifier> WHERE <conditions: Conditions> => SelectQuery {
+      from: tablename.to_string(),
+      fields: fields,
+      group_by: Vec::new(),
+      where_constraints: conditions,
+      order_by_time: OrderDirection::Asc,
+      limit: None,
+      slimit: None
+    }
+
+}
