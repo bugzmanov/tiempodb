@@ -1,5 +1,6 @@
 use crate::sql::ast::*;
 use std::str::FromStr;
+use lalrpop_util::ParseError;
 
 grammar;
 
@@ -7,7 +8,11 @@ grammar;
 EQ: &'input str = "=" => <>;
 NEQ: &'input str = "<>" => <>;
 GT: &'input str = ">" => <>;
+GTE: &'input str = ">=" => <>;
+
 LT: &'input str = "<" => <>;
+LTE: &'input str = "<=" => <>;
+
 LIKE: &'input str = "=~" => <>;
 NOT_LIKE: &'input str = "!=~" => <>;
 
@@ -15,13 +20,19 @@ NOT_LIKE: &'input str = "!=~" => <>;
 SELECT: &'input str = "SELECT" => <>;
 FROM: &'input str = "FROM" => <>;
 WHERE: &'input str = "WHERE" => <>;
+GROUP_BY: &'input str = "GROUP BY" => <>;
+LIMIT: &'input str = "LIMIT" => <>;
+SLIMIT: &'input str = "SLIMIT" => <>;
 
-pub Term: i32 = {
+pub Term: u32 = {
     <n:Num> => n,
     "(" <t:Term> ")" => t,
 };
 
-Num: i32 = <s:r"[0-9]+"> => i32::from_str(s).unwrap();
+Num: u32 = <s:r"[0-9]+"> =>? u32::from_str(s)
+    .map_err(|_| ParseError::User {
+        error: "number is too big"
+    });
 
 /// seperators
 Comma<T>: Vec<T> = {
@@ -51,19 +62,54 @@ And<T>: Vec<T> = {
             v.push(e);
             v
         }
-    }
+    },
+
+    "(" <mut v: And<T>> ")" " AND " <mut v2: And<T>> =>  {
+        v.append(&mut v2);
+        v
+    },
+    
+//    "(" <mut v: And<T>> ")" " AND " <e:T> =>  {
+//        v.push(e);
+//        v
+//    },
+//
+    <e: T> " AND " "(" <mut v: And<T>> ")"  =>  {
+        v.push(e);
+        v
+    },
+
+    "(" <v: And<T>> ")" => v 
 }
 
 // statement parts
-
-Identifier:String = {
-    r"[a-zA-Z][a-zA-Z0-9]*" => <>.to_string(),
-    r#""\w+""# => <>.replace("\"",""),
-    r#"'\w+'"# => <>.replace("\'",""),
+//todo: microseconds are not covered
+Time: Time = {
+    <n: Num> "ns" => Time::NanoSeconds(n as u64),
+    <n: Num> "ms" => Time::MilliSeconds(n as u64),
+    <n: Num> "s" => Time::Seconds(n as u64),
+    <n: Num> "m" => Time::Minutes(n as u64),
+    <n: Num> "h" => Time::Hours(n as u64),
+    <n: Num> "d" => Time::Days(n as u64),
 }
 
+Identifier:String = {
+    r"([a-zA-Z][a-zA-Z0-9\\.]*)|(time)" => <>.to_string(),
+    r#""\w[\w.]*""# => <>.replace("\"",""),
+    r#"'.+'"# => <>.replace("\'",""),
+
+    //todo: this is inappropriate place
+    "time" => "time".to_string(),
+    "now()" => "now()".to_string(),
+    "now()" "+" <t:Time> => format!("now() + {}", <>),
+    "now()" "-" <t:Time> => format!("now() - {}", <>),
+}
+
+
+// fields
+
 RegExpValue: &'input str = {
-    r#"/.+/"# => <>
+     r#"/[^/]*(?:\\.[^/]*)*/"# => <>
 }
 
 SelectionFunction: SelectionType = {
@@ -98,11 +144,15 @@ Field: FieldProjection = {
 
 Fields = Comma<Field>;
 
+// where
+
 Comparison: ComparisonType = {
     EQ => ComparisonType::Eq,
     NEQ => ComparisonType::NotEq,
     GT => ComparisonType::Gt,
-    LT => ComparisonType::Lt
+    GTE => ComparisonType::Gte,
+    LT => ComparisonType::Lt,
+    LTE => ComparisonType::Lte,
 }
 
 RegExpComparison: ComparisonType = {
@@ -122,38 +172,90 @@ Condition: Condition = {
         source: source,
         comparison: op,
         value: value.to_string()
-    }
+    },
+
+//    "(" <condition: Condition> ")" => condition 
 }
 
 Conditions = And<Condition>;
 
-Limit: Option<String> = {
-    "LIMIT" <points_num: Num> => {
-        Some(points_num.to_string())
-    },
-    ! => None
+WhereConditions: Vec<Condition> = {
+    WHERE <conditions: Conditions> => conditions,
 }
+
+// Group By
+
+
+Fill: Fill = {
+    "fill" "(" "linear"  ")" => Fill::Linear,
+    "fill" "(" "none"    ")" => Fill::None,
+    "fill" "(" "null"     ")" => Fill::Null,
+    "fill" "(" "previous" ")" => Fill::Previous,
+    //! => Fill::None,
+}
+
+GroupBy: GroupBy = {
+    GROUP_BY "time" "(" <time: Time> ")" <fill: Fill?> => 
+        GroupBy {
+            by_time: Some(time),
+            by_field: None,
+            fill: fill.unwrap_or(Fill::None)
+        },
+    GROUP_BY "time" "(" <time: Time> ")" "," <field: Identifier> <fill: Fill?> => 
+        GroupBy {
+            by_time: Some(time),
+            by_field: Some(field.to_string()),
+            fill: fill.unwrap_or(Fill::None)
+        },
+    GROUP_BY <field: Identifier> <fill: Fill?> => 
+        GroupBy {
+            by_time: None,
+            by_field: Some(field.to_string()),
+            fill: fill.unwrap_or(Fill::None)
+        },
+}
+
+// Order by
+
+OrderBy: OrderDirection = {
+    "ORDER BY time DESC" => OrderDirection::Desc,
+    "ORDER BY time ASC" => OrderDirection::Asc,
+}
+
+// LIMIT, SLIMIT
+
+Limit: (Option<u32>, Option<u32>) = {
+    LIMIT <points_num: Num> => {
+        (Some(points_num), None)
+    },
+
+    SLIMIT <points_num: Num> => {
+        (None, Some(points_num))
+    },
+
+    LIMIT <limit: Num> "," SLIMIT <slimit: Num> => {
+        (Some(limit), Some(slimit))
+    },
+
+    SLIMIT <slimit: Num> "," LIMIT <limit: Num> => {
+        (Some(limit), Some(slimit))
+    },
+
+    ! => (None, None)
+}
+
 
 // expressions
 pub SelectStatement: SelectQuery = {
-    SELECT <fields: Fields> FROM <tablename: Identifier> <limit: Limit> => SelectQuery {
-      from: tablename.to_string(),
-      fields: fields,
-      group_by: Vec::new(),
-      where_constraints: Vec::new(),
-      order_by_time: OrderDirection::Asc,
-      limit: limit.map(|numstr| u32::from_str(&numstr).unwrap()),
-      slimit: None
-    },
 
-    SELECT <fields: Fields> FROM <tablename: Identifier> WHERE <conditions: Conditions> => SelectQuery {
+    SELECT <fields: Fields> FROM <tablename: Identifier> <conditions: WhereConditions?> <group_by: GroupBy?> <order_by: OrderBy?> <limit: Limit> => SelectQuery {
       from: tablename.to_string(),
       fields: fields,
-      group_by: Vec::new(),
-      where_constraints: conditions,
-      order_by_time: OrderDirection::Asc,
-      limit: None,
-      slimit: None
+      group_by: group_by.unwrap_or_else(|| GroupBy::default()),
+      where_constraints: conditions.unwrap_or_else(|| Vec::new()),
+      order_by_time: order_by.unwrap_or_else(|| OrderDirection::Asc),
+      limit: limit.0,
+      slimit: limit.1
     }
 
 }
