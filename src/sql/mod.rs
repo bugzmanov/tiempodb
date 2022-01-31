@@ -145,13 +145,88 @@ select mean("value") from "logins.count" where ("datacenter" =~ /^America$/ and 
         assert_eq!(Some(10), query.slimit);
     }
 
-    // #[test]
-    // fn test_get_tag_values() {
-    //     let query = dbg!(sqlparser::ShowTagValuesQueryParser::new().parse(
-    //         r#"SHOW TAG VALUES FROM "cpu" WITH KEY = "hostname" WHERE "datacenter" =~ /^America$/"#
-    //     ))
-    //     .unwrap();
+    #[test]
+    fn test_get_tag_values() {
+        let query = dbg!(sqlparser::ShowTagValuesStatementParser::new().parse(
+            r#"SHOW TAG VALUES FROM "cpu" WITH KEY = "hostname" WHERE "datacenter" =~ /^America$/ and "hostname" <> "server1""#
+        ))
+        .unwrap();
+        assert_eq!(query.from, "cpu".to_string());
+        assert_eq!(
+            query.where_constraints,
+            vec![
+                Condition::new(
+                    "datacenter".to_string(),
+                    ComparisonType::Like,
+                    "/^America$/".to_string(),
+                ),
+                Condition::new(
+                    "hostname".to_string(),
+                    ComparisonType::NotEq,
+                    r#"server1"#.to_string(),
+                ),
+            ],
+        );
+    }
 
-    //     assert_eq!(query., "cpu"
-    // }
+    #[test]
+    fn test_get_tag_keys() {
+        let query = dbg!(sqlparser::ShowTagKeysStatementParser::new().parse(
+                r#"SHOW TAG KEYS FROM "cpu" WHERE "datacenter" =~ /^America$/ AND "hostname" !=~ /^(server1|server2)$/"# 
+        ))
+            .unwrap();
+        assert_eq!(query.from, "cpu".to_string());
+        assert_eq!(
+            query.where_constraints,
+            vec![
+                Condition::new(
+                    "datacenter".to_string(),
+                    ComparisonType::Like,
+                    "/^America$/".to_string(),
+                ),
+                Condition::new(
+                    "hostname".to_string(),
+                    ComparisonType::NotLike,
+                    r#"/^(server1|server2)$/"#.to_string(),
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_show_measurement() {
+        let query = dbg!(sqlparser::ShowMeasurementsStatementParser::new().parse(
+            r#"SHOW MEASUREMENTS WHERE "datacenter" =~ /^America$/ AND "hostname" =~ /^(server1|server2|10\.1\.100\.1|10\.1\.100\.10)$/ LIMIT 100"#
+        ))
+        .unwrap();
+        assert_eq!(query.limit, 100);
+        assert_eq!(
+            query.where_constraints,
+            vec![
+                Condition::new(
+                    "datacenter".to_string(),
+                    ComparisonType::Like,
+                    "/^America$/".to_string(),
+                ),
+                Condition::new(
+                    "hostname".to_string(),
+                    ComparisonType::Like,
+                    r#"/^(server1|server2|10\.1\.100\.1|10\.1\.100\.10)$/"#.to_string(),
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_query_parser() {
+        let query = dbg!(sqlparser::QueryParser::new().parse(
+            r#"SHOW MEASUREMENTS WHERE "datacenter" =~ /^America$/ AND "hostname" =~ /^(server1|server2|10\.1\.100\.1|10\.1\.100\.10)$/ LIMIT 100"#
+        ))
+        .unwrap();
+        if let Query::Measurements(q) = query {
+            assert_eq!(q.limit, 100);
+        } else {
+            panic!("Should be recognised as show measurements");
+        }
+    }
 }

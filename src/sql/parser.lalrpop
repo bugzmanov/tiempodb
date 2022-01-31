@@ -16,6 +16,11 @@ match {
 //    r"(?i)null" => "NULL",  // this will cause failures for fill(null)
     r"(?i)limit" => "LIMIT",
     r"(?i)slimit" => "SLIMIT",
+    r"(?i)show" => "SHOW",
+    r"(?i)tag values" => "TAG VALUES",
+    r"(?i)tag keys" => "TAG KEYS",
+    r"(?i)with key" => "WITH KEY",
+    r"(?i)measurements" => "MEASUREMENTS",
 } else {
     _
 }
@@ -268,30 +273,38 @@ pub SelectStatement: SelectQuery = {
     }
 }
 
-pub ShowFieldKeysQuery: ShowFieldKeysQuery = {
+pub ShowFieldKeysStatement: ShowFieldKeysQuery = {
     "SHOW" "FIELD" "KEYS" "FROM" <id: Identifier> => ShowFieldKeysQuery {
         from: id
     }
 }
 
-pub ShowTagKeysQuery: ShowTagKeysQuery = {
-    "SHOW" "TAG" "KEYS" "FROM" <id: Identifier> <conditions: WhereConditions?> => ShowTagKeysQuery {
+pub ShowTagKeysStatement: ShowTagKeysQuery = {
+    "SHOW" "TAG KEYS" "FROM" <id: Identifier> <conditions: WhereConditions?> => ShowTagKeysQuery {
         from: id,
         where_constraints: conditions.unwrap_or_else(|| Vec::new()),
     }
 }
 
-pub ShowTagValuesQuery: ShowTagValuesQuery = {
-    "SHOW" "TAG" "VALUES" "FROM" <id: Identifier> "WITH" "KEY" "=" <key_id: Identifier> <conditions: WhereConditions?> => ShowTagValuesQuery {
+pub ShowTagValuesStatement: ShowTagValuesQuery = {
+    "SHOW" "TAG VALUES" "FROM" <id: Identifier> "WITH KEY" "=" <key_id: Identifier> <conditions: WhereConditions?> => ShowTagValuesQuery {
         from: id,
         key: key_id,
         where_constraints: conditions.unwrap_or_else(|| Vec::new()),
     }
 }
 
-pub ShowMeasurementsQuery: ShowMeasurementsQuery = {
+pub ShowMeasurementsStatement: ShowMeasurementsQuery = {
     "SHOW" "MEASUREMENTS" <conditions: WhereConditions?> "LIMIT" <limit: Num> => ShowMeasurementsQuery {
         where_constraints: conditions.unwrap_or_else(|| Vec::new()),
         limit: limit,
     }
+}
+
+pub Query: Query = {
+    <select: SelectStatement> => Query::Select(select), 
+    <tag_keys: ShowTagKeysStatement> => Query::TagKeys(tag_keys),
+    <tag_values: ShowTagValuesStatement> => Query::TagValues(tag_values),
+    <field_keys: ShowFieldKeysStatement> => Query::FieldKeys(field_keys),
+    <measurements: ShowMeasurementsStatement> => Query::Measurements(measurements),
 }

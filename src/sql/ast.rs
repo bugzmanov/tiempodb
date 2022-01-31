@@ -20,7 +20,7 @@ pub enum SelectionType {
     Identity,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum OrderDirection {
     Asc,
     Desc,
@@ -130,7 +130,7 @@ impl Condition {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct SelectQuery {
     pub from: String,
     pub fields: Vec<FieldProjection>,
@@ -163,4 +163,13 @@ pub struct ShowTagValuesQuery {
     pub from: String,
     pub key: String,
     pub where_constraints: Vec<Condition>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Query {
+    Select(SelectQuery),
+    TagKeys(ShowTagKeysQuery),
+    TagValues(ShowTagValuesQuery),
+    FieldKeys(ShowFieldKeysQuery),
+    Measurements(ShowMeasurementsQuery),
 }
