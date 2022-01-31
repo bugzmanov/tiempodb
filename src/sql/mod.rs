@@ -1,4 +1,3 @@
-use ast::*;
 use lalrpop_util::lalrpop_mod;
 
 mod ast;
@@ -8,7 +7,8 @@ lalrpop_mod!(pub sqlparser, "/sql/parser.rs");
 #[cfg(test)]
 mod test {
     use super::*;
-    use claim::{assert_none, assert_some};
+    use ast::*;
+    use claim::assert_none;
 
     #[test]
     fn sql_parse() {
@@ -105,4 +105,53 @@ SELECT mean("value") FROM "logins.count" WHERE ("datacenter" =~ /^America$/ AND 
 
         assert_none!(query.limit);
     }
+
+    #[test]
+    fn test_lowercase_keywords() {
+        let query = dbg!(sqlparser::SelectStatementParser::new().parse(
+            r#"
+select mean("value") from "logins.count" where ("datacenter" =~ /^America$/ and "hostname" =~ /^(server1|server2|10\.1\.100\.1|10\.1\.100\.10)$/) group by "hostname" limit 5 slimit 10"#
+        ))
+        .unwrap();
+        assert_eq!(query.from, "logins.count");
+        assert_eq!(query.fields, vec![FieldProjection::mean("value"),],);
+
+        assert_eq!(
+            query.where_constraints,
+            vec![
+                Condition::new(
+                    "datacenter".to_string(),
+                    ComparisonType::Like,
+                    "/^America$/".to_string()
+                ),
+                Condition::new(
+                    "hostname".to_string(),
+                    ComparisonType::Like,
+                    r#"/^(server1|server2|10\.1\.100\.1|10\.1\.100\.10)$/"#.to_string()
+                )
+            ],
+        );
+
+        assert_eq!(
+            query.group_by,
+            GroupBy {
+                by_time: None,
+                by_field: Some("hostname".to_string()),
+                fill: Fill::None
+            }
+        );
+
+        assert_eq!(Some(5), query.limit);
+        assert_eq!(Some(10), query.slimit);
+    }
+
+    // #[test]
+    // fn test_get_tag_values() {
+    //     let query = dbg!(sqlparser::ShowTagValuesQueryParser::new().parse(
+    //         r#"SHOW TAG VALUES FROM "cpu" WITH KEY = "hostname" WHERE "datacenter" =~ /^America$/"#
+    //     ))
+    //     .unwrap();
+
+    //     assert_eq!(query., "cpu"
+    // }
 }

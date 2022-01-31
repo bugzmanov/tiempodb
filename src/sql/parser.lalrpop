@@ -4,6 +4,22 @@ use lalrpop_util::ParseError;
 
 grammar;
 
+match {
+    r"(?i)select" => "SELECT",
+    r"(?i)from" => "FROM",
+    r"(?i) and " => " AND ",
+    r"(?i)group by" => "GROUP BY",
+    r"(?i)where" => "WHERE",
+    r"(?i)order by" => "ORDER BY",
+    r"(?i)desc" => "DESC",
+    r"(?i)asc" => "ASC",
+//    r"(?i)null" => "NULL",  // this will cause failures for fill(null)
+    r"(?i)limit" => "LIMIT",
+    r"(?i)slimit" => "SLIMIT",
+} else {
+    _
+}
+
 /// operators
 EQ: &'input str = "=" => <>;
 NEQ: &'input str = "<>" => <>;
@@ -69,11 +85,6 @@ And<T>: Vec<T> = {
         v
     },
     
-//    "(" <mut v: And<T>> ")" " AND " <e:T> =>  {
-//        v.push(e);
-//        v
-//    },
-//
     <e: T> " AND " "(" <mut v: And<T>> ")"  =>  {
         v.push(e);
         v
@@ -100,14 +111,10 @@ Identifier:String = {
 
     //todo: this is inappropriate place
     "time" => "time".to_string(),
-    "now()" => "now()".to_string(),
-    "now()" "+" <t:Time> => format!("now() + {}", <>),
-    "now()" "-" <t:Time> => format!("now() - {}", <>),
 }
 
 
 // fields
-
 RegExpValue: &'input str = {
      r#"/[^/]*(?:\\.[^/]*)*/"# => <>
 }
@@ -160,9 +167,15 @@ RegExpComparison: ComparisonType = {
     NOT_LIKE => ComparisonType::NotLike,
 }
 
-//todo the right side is not identifier
+ComparisonExpression: String = {
+    <identifier: Identifier> => <>,
+    "now()" => "now()".to_string(),
+    "now()" "+" <t:Time> => format!("now() + {}", <>),
+    "now()" "-" <t:Time> => format!("now() - {}", <>),
+}
+
 Condition: Condition = {
-    <source: Identifier> <op: Comparison> <value: Identifier> => Condition {
+    <source: ComparisonExpression> <op: Comparison> <value: ComparisonExpression> => Condition {
         source: source,
         comparison: op,
         value: value
@@ -172,9 +185,7 @@ Condition: Condition = {
         source: source,
         comparison: op,
         value: value.to_string()
-    },
-
-//    "(" <condition: Condition> ")" => condition 
+    }
 }
 
 Conditions = And<Condition>;
@@ -191,7 +202,6 @@ Fill: Fill = {
     "fill" "(" "none"    ")" => Fill::None,
     "fill" "(" "null"     ")" => Fill::Null,
     "fill" "(" "previous" ")" => Fill::Previous,
-    //! => Fill::None,
 }
 
 GroupBy: GroupBy = {
@@ -233,11 +243,11 @@ Limit: (Option<u32>, Option<u32>) = {
         (None, Some(points_num))
     },
 
-    LIMIT <limit: Num> "," SLIMIT <slimit: Num> => {
+    LIMIT <limit: Num> SLIMIT <slimit: Num> => {
         (Some(limit), Some(slimit))
     },
 
-    SLIMIT <slimit: Num> "," LIMIT <limit: Num> => {
+    SLIMIT <slimit: Num> LIMIT <limit: Num> => {
         (Some(limit), Some(slimit))
     },
 
@@ -247,7 +257,6 @@ Limit: (Option<u32>, Option<u32>) = {
 
 // expressions
 pub SelectStatement: SelectQuery = {
-
     SELECT <fields: Fields> FROM <tablename: Identifier> <conditions: WhereConditions?> <group_by: GroupBy?> <order_by: OrderBy?> <limit: Limit> => SelectQuery {
       from: tablename.to_string(),
       fields: fields,
@@ -257,5 +266,32 @@ pub SelectStatement: SelectQuery = {
       limit: limit.0,
       slimit: limit.1
     }
+}
 
+pub ShowFieldKeysQuery: ShowFieldKeysQuery = {
+    "SHOW" "FIELD" "KEYS" "FROM" <id: Identifier> => ShowFieldKeysQuery {
+        from: id
+    }
+}
+
+pub ShowTagKeysQuery: ShowTagKeysQuery = {
+    "SHOW" "TAG" "KEYS" "FROM" <id: Identifier> <conditions: WhereConditions?> => ShowTagKeysQuery {
+        from: id,
+        where_constraints: conditions.unwrap_or_else(|| Vec::new()),
+    }
+}
+
+pub ShowTagValuesQuery: ShowTagValuesQuery = {
+    "SHOW" "TAG" "VALUES" "FROM" <id: Identifier> "WITH" "KEY" "=" <key_id: Identifier> <conditions: WhereConditions?> => ShowTagValuesQuery {
+        from: id,
+        key: key_id,
+        where_constraints: conditions.unwrap_or_else(|| Vec::new()),
+    }
+}
+
+pub ShowMeasurementsQuery: ShowMeasurementsQuery = {
+    "SHOW" "MEASUREMENTS" <conditions: WhereConditions?> "LIMIT" <limit: Num> => ShowMeasurementsQuery {
+        where_constraints: conditions.unwrap_or_else(|| Vec::new()),
+        limit: limit,
+    }
 }

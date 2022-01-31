@@ -140,3 +140,27 @@ pub struct SelectQuery {
     pub limit: Option<u32>,
     pub slimit: Option<u32>,
 }
+
+#[derive(Debug, PartialEq)]
+pub struct ShowFieldKeysQuery {
+    pub from: String,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ShowMeasurementsQuery {
+    pub where_constraints: Vec<Condition>,
+    pub limit: u32,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ShowTagKeysQuery {
+    pub from: String,
+    pub where_constraints: Vec<Condition>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ShowTagValuesQuery {
+    pub from: String,
+    pub key: String,
+    pub where_constraints: Vec<Condition>,
+}
