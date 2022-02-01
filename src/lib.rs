@@ -4,10 +4,10 @@
 pub mod ingest;
 pub mod partition;
 mod protocol;
+mod server;
 mod sql;
 pub mod storage;
 mod wal;
-
 #[macro_use]
 extern crate lalrpop_util;
 
