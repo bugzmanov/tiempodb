@@ -1,6 +1,7 @@
 use lalrpop_util::lalrpop_mod;
 
 mod ast;
+pub mod query_engine;
 
 lalrpop_mod!(pub sqlparser, "/sql/parser.rs");
 

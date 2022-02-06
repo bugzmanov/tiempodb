@@ -1,15 +1,43 @@
+use crate::sql::query_engine::QueryEngine;
 use anyhow::Context;
 use crossbeam::channel;
 use futures::stream::StreamExt;
 use futures::AsyncBufReadExt;
 use hyper::Body;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
 pub type Response = hyper::Response<Body>;
 pub type Request = hyper::Request<Body>;
 
+async fn body_into_json<T: serde::de::DeserializeOwned>(request: Request) -> anyhow::Result<T> {
+    hyper::body::to_bytes(request.into_body())
+        .await
+        .with_context(|| "failed to fetch_body")
+        .and_then(|b| {
+            String::from_utf8(b.to_vec()).with_context(|| "failed to convert body to utf8 string")
+        })
+        .and_then(|json| serde_json::from_str::<T>(&json).with_context(|| "failed to parse json"))
+}
+
+pub fn to_http_response(err: anyhow::Error, status: u16) -> Response {
+    hyper::Response::builder()
+        .status(status)
+        .header(hyper::header::CONTENT_TYPE, "application/json")
+        .body(format!("{{\"error\":\"{:?}\" }}", err).into())
+        .unwrap() // todo: guarantee that it wont fail
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Query {
+    query: String,
+    #[serde(rename(deserialize = "type", serialize = "type"))]
+    query_type: String,
+}
+
 struct TiempoServer {
     engine: channel::Sender<String>,
+    query_engine: QueryEngine,
 }
 
 fn parse_query(path_query: Option<&str>) -> Vec<(String, String)> {
@@ -22,9 +50,21 @@ fn parse_query(path_query: Option<&str>) -> Vec<(String, String)> {
 }
 
 impl TiempoServer {
+    fn new(engine: channel::Sender<String>) -> Self {
+        TiempoServer {
+            engine,
+            query_engine: QueryEngine {},
+        }
+    }
+
     async fn tick(&self, req: Request) -> Result<Response, String> {
         match *req.method() {
-            hyper::Method::POST if req.uri().path().starts_with("/query") => self.get(req).await,
+            hyper::Method::POST if req.uri().path().starts_with("/query") => {
+                match self.get(req).await {
+                    Ok(x) => Ok(x),
+                    Err(x) => Ok(x),
+                }
+            }
             hyper::Method::POST if req.uri().path().starts_with("/write") => self.put(req).await,
             _ => hyper::Response::builder()
                 .status(hyper::StatusCode::BAD_REQUEST)
@@ -68,12 +108,20 @@ impl TiempoServer {
             .map_err(|e| format!("{e}"))
     }
 
-    async fn get(&self, req: Request) -> Result<Response, String> {
+    async fn get(&self, req: Request) -> Result<Response, Response> {
+        let query = body_into_json::<Query>(req)
+            .await
+            .map_err(|e| to_http_response(e, 400))?;
+        let result = self.query_engine.run_query(&query.query);
+        let json = serde_json::to_string(&result)
+            .with_context(|| "failed to parse json")
+            .map_err(|e| to_http_response(e, 500))?;
         hyper::Response::builder()
             .status(200)
             .header(hyper::header::CONTENT_TYPE, "application/json")
-            .body("ok".into())
-            .map_err(|e| format!("{e}"))
+            .body(json.into())
+            .with_context(|| "fail to send body")
+            .map_err(|e| to_http_response(e, 500))
     }
 }
 
@@ -175,7 +223,7 @@ mod test {
             .unwrap();
 
         let (sender, receiver) = crossbeam::channel::unbounded();
-        let server = TiempoServer { engine: sender };
+        let server = TiempoServer::new(sender);
 
         let response = dbg!(tokio_test::block_on(server.tick(request)));
         assert_eq!(true, response.is_ok());
@@ -183,5 +231,27 @@ mod test {
 
         let v: Vec<String> = receiver.try_iter().collect();
         assert_eq!(v, vec!["first_line", "second_line", "third_line"]);
+    }
+
+    #[test]
+    fn test_get() {
+        let body = serde_json::to_string(&Query {
+            query_type: "influxdb".into(),
+            query: "SELECT * FROM \"OLOLO\"".into(),
+        })
+        .unwrap();
+        let request = hyper::Request::builder()
+            .uri("http://localhost/query?bucket=test_bucket&org=rbag&precision=ms")
+            .header("Accept", "application/json")
+            .method("POST")
+            .body(body.into())
+            .unwrap();
+
+        let (sender, _) = crossbeam::channel::unbounded();
+        let server = TiempoServer::new(sender);
+
+        let response = dbg!(tokio_test::block_on(server.tick(request)));
+        assert_eq!(true, response.is_ok());
+        assert_eq!(hyper::StatusCode::OK, response.unwrap().status());
     }
 }
