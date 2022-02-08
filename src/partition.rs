@@ -525,6 +525,6 @@ mod test {
 
         assert_eq!(metrics, vec!["second".to_string()].into_iter().collect());
         scenario.teardown();
-        Ok(())
+        // Ok(())
     }
 }

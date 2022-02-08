@@ -2,7 +2,6 @@ use crate::sql::query_engine::QueryEngine;
 use anyhow::Context;
 use crossbeam::channel;
 use futures::stream::StreamExt;
-use futures::AsyncBufReadExt;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -10,8 +9,8 @@ use std::collections::VecDeque;
 pub type Response = hyper::Response<Body>;
 pub type Request = hyper::Request<Body>;
 
-async fn body_into_json<T: serde::de::DeserializeOwned>(request: Request) -> anyhow::Result<T> {
-    hyper::body::to_bytes(request.into_body())
+async fn body_into_json<T: serde::de::DeserializeOwned>(request: Body) -> anyhow::Result<T> {
+    hyper::body::to_bytes(request)
         .await
         .with_context(|| "failed to fetch_body")
         .and_then(|b| {
@@ -75,7 +74,7 @@ impl TiempoServer {
     }
 
     async fn put(&self, req: Request) -> Result<Response, String> {
-        let query = parse_query(req.uri().query()); //todo: bucket, org, resolution
+        // let query = parse_query(req.uri().query()); //todo: bucket, org, resolution
         let headers = req.headers();
         if let Some(encoding) = headers.get(hyper::header::CONTENT_ENCODING) {
             //todo: encoding value check
@@ -109,7 +108,7 @@ impl TiempoServer {
     }
 
     async fn get(&self, req: Request) -> Result<Response, Response> {
-        let query = body_into_json::<Query>(req)
+        let query = body_into_json::<Query>(req.into_body())
             .await
             .map_err(|e| to_http_response(e, 400))?;
         let result = self.query_engine.run_query(&query.query);
@@ -179,6 +178,8 @@ impl LinesIterator {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    use crate::sql::query_engine::QueryResult;
 
     #[test]
     fn test_line_terator() {
@@ -252,6 +253,46 @@ mod test {
 
         let response = dbg!(tokio_test::block_on(server.tick(request)));
         assert_eq!(true, response.is_ok());
-        assert_eq!(hyper::StatusCode::OK, response.unwrap().status());
+        // assert_eq!(hyper::StatusCode::OK, response.unwrap().status());
+        let response_obj =
+            tokio_test::block_on(body_into_json::<QueryResult>(response.unwrap().into_body()))
+                .unwrap();
+        assert_eq!(
+            response_obj.results.get(0).map(|x| x.statement_id.clone()),
+            Some("0".into())
+        );
+    }
+
+    #[test]
+    fn test_get_failure_unrecognized_json() {
+        let body = r#"{
+            "not_": "is what expected"
+        }"#;
+        let request = hyper::Request::builder()
+            .uri("http://localhost/query?bucket=test_bucket&org=rbag&precision=ms")
+            .header("Accept", "application/json")
+            .method("POST")
+            .body(body.into())
+            .unwrap();
+
+        let (sender, _) = crossbeam::channel::unbounded();
+        let server = TiempoServer::new(sender);
+        let response = dbg!(tokio_test::block_on(server.tick(request)));
+        assert_eq!(hyper::StatusCode::BAD_REQUEST, response.unwrap().status());
+    }
+
+    #[test]
+    fn test_get_failute_invalid_json() {
+        let body = "{this  is invalid}";
+        let request = hyper::Request::builder()
+            .uri("http://localhost/query?bucket=test_bucket&org=rbag&precision=ms")
+            .header("Accept", "application/json")
+            .method("POST")
+            .body(body.into())
+            .unwrap();
+        let (sender, _) = crossbeam::channel::unbounded();
+        let server = TiempoServer::new(sender);
+        let response = tokio_test::block_on(server.tick(request));
+        assert_eq!(hyper::StatusCode::BAD_REQUEST, response.unwrap().status());
     }
 }

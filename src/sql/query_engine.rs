@@ -18,21 +18,21 @@ pub struct QueryEngine {}
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct QueryResult {
-    results: Vec<StatementSeries>,
+    pub results: Vec<StatementSeries>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct StatementSeries {
-    statement_id: String,
-    series: Vec<Series>,
+    pub statement_id: String,
+    pub series: Vec<Series>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct Series {
-    name: String,
-    tags: HashMap<String, String>, // todo: change to vector of tuples?
-    columns: Vec<String>,
-    values: Vec<Vec<String>>, // todo: change from string to valuetype
+    pub name: String,
+    pub tags: HashMap<String, String>, // todo: change to vector of tuples?
+    pub columns: Vec<String>,
+    pub values: Vec<Vec<String>>, // todo: change from string to valuetype
 }
 
 impl QueryEngine {
