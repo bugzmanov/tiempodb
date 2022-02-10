@@ -35,6 +35,7 @@ futures = { version="0.3"}
 url = { version="2"}
 anyhow="1.0.53"
 futures-util="0.3.19"
+env_logger = "0.9.0"
 
 [dev-dependencies]
 claim = "0.5"
@@ -47,3 +48,5 @@ tokio-test="0.4.2"
 name = "my_benchmark"
 harness = false
 
+[[bin]]
+name="server"

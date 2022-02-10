@@ -1,13 +1,52 @@
-use crate::sql::query_engine::QueryEngine;
-use anyhow::Context;
+use anyhow::{anyhow, bail, Context};
 use crossbeam::channel;
 use futures::stream::StreamExt;
-use hyper::Body;
+use hyper::{Body, Server};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::error::Error;
+use std::net::{Ipv4Addr, SocketAddrV4};
+use std::sync::Arc;
+use tiempodb::sql::query_engine::QueryEngine;
 
 pub type Response = hyper::Response<Body>;
 pub type Request = hyper::Request<Body>;
+
+fn main() {
+    env_logger::init();
+    log::info!("starting tiempodb web service");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_name("tiempodb-serve")
+        .thread_stack_size(1024 * 1024)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let (sender, receiver) = crossbeam::channel::unbounded(); //todo unbounded
+    let tiempo_server = Arc::new(TiempoServer::new(sender));
+    let service = hyper::service::make_service_fn(move |connection| {
+        let server = tiempo_server.clone();
+        async move {
+            Ok::<_, std::convert::Infallible>(hyper::service::service_fn(move |request| {
+                let server = server.clone();
+                async move {
+                    match server.tick(request).await {
+                        ok @ Ok(_) => ok,
+                        Err(x) => Ok(to_http_response(anyhow!(x), 500)),
+                    }
+                }
+            }))
+        }
+    });
+
+    runtime
+        .block_on(async {
+            let serve = Server::bind(&("127.0.0.1:8085".parse().expect("hardcoded bind address")))
+                .serve(service);
+            log::info!("Start serving requests");
+            serve.await
+        })
+        .expect("start service in tokio runtime");
+}
 
 async fn body_into_json<T: serde::de::DeserializeOwned>(request: Body) -> anyhow::Result<T> {
     hyper::body::to_bytes(request)
@@ -24,7 +63,7 @@ pub fn to_http_response(err: anyhow::Error, status: u16) -> Response {
         .status(status)
         .header(hyper::header::CONTENT_TYPE, "application/json")
         .body(format!("{{\"error\":\"{:?}\" }}", err).into())
-        .unwrap() // todo: guarantee that it wont fail
+        .expect("mapping from error to Response") // todo: guarantee that it wont fail
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -52,7 +91,7 @@ impl TiempoServer {
     fn new(engine: channel::Sender<String>) -> Self {
         TiempoServer {
             engine,
-            query_engine: QueryEngine {},
+            query_engine: QueryEngine::new(),
         }
     }
 
@@ -76,7 +115,7 @@ impl TiempoServer {
     async fn put(&self, req: Request) -> Result<Response, String> {
         // let query = parse_query(req.uri().query()); //todo: bucket, org, resolution
         let headers = req.headers();
-        if let Some(encoding) = headers.get(hyper::header::CONTENT_ENCODING) {
+        if let Some(_encoding) = headers.get(hyper::header::CONTENT_ENCODING) {
             //todo: encoding value check
             todo!("gzipped content is not supported yet");
         } else {
@@ -111,7 +150,11 @@ impl TiempoServer {
         let query = body_into_json::<Query>(req.into_body())
             .await
             .map_err(|e| to_http_response(e, 400))?;
-        let result = self.query_engine.run_query(&query.query);
+        let result = self
+            .query_engine
+            .run_query(&query.query)
+            .map_err(|e| to_http_response(e, 400))?;
+
         let json = serde_json::to_string(&result)
             .with_context(|| "failed to parse json")
             .map_err(|e| to_http_response(e, 500))?;
@@ -179,7 +222,7 @@ impl LinesIterator {
 mod test {
     use super::*;
 
-    use crate::sql::query_engine::QueryResult;
+    use tiempodb::sql::query_engine::QueryResult;
 
     #[test]
     fn test_line_terator() {
@@ -238,7 +281,7 @@ mod test {
     fn test_get() {
         let body = serde_json::to_string(&Query {
             query_type: "influxdb".into(),
-            query: "SELECT * FROM \"OLOLO\"".into(),
+            query: "SELECT \"name\" FROM \"OLOLO\"".into(),
         })
         .unwrap();
         let request = hyper::Request::builder()
@@ -253,7 +296,6 @@ mod test {
 
         let response = dbg!(tokio_test::block_on(server.tick(request)));
         assert_eq!(true, response.is_ok());
-        // assert_eq!(hyper::StatusCode::OK, response.unwrap().status());
         let response_obj =
             tokio_test::block_on(body_into_json::<QueryResult>(response.unwrap().into_body()))
                 .unwrap();
