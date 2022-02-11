@@ -7,7 +7,6 @@ mod protocol;
 pub mod sql;
 pub mod storage;
 mod wal;
-#[macro_use]
 extern crate lalrpop_util;
 
 #[cfg(test)]

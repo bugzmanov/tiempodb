@@ -6,6 +6,7 @@ use crate::storage::SnaphotableStorage;
 use crate::storage::Storage;
 use crate::wal::Wal;
 use crate::wal::WalBlockReader;
+use anyhow::{Context, Result};
 use crossbeam::channel;
 use crossbeam::channel::SendError;
 use crossbeam::channel::TryRecvError;
@@ -73,7 +74,7 @@ impl Engine {
         storage: SnaphotableStorage,
         wal_path: &Path,
         partitions_path: &Path,
-    ) -> io::Result<Self> {
+    ) -> Result<Self> {
         let (tasks_sender, tasks_receiver) = crossbeam::channel::unbounded();
         let (results_sender, results_receiver) = crossbeam::channel::unbounded();
 
@@ -105,7 +106,7 @@ impl Engine {
     }
 
     //todo: ingest multi-line
-    pub fn ingest(&mut self, line_str: &str) -> io::Result<()> {
+    pub fn ingest(&mut self, line_str: &str) -> Result<()> {
         self.wal.write(line_str.as_bytes())?;
         self.save_to_storage(line_str);
         //todo: hardcoded value for now
@@ -122,7 +123,12 @@ impl Engine {
                     assert!(self.worker.tick());
                 }
                 Err(e) => {
-                    todo!("unimplemented")
+                    log::error!(
+                        "[ingest engine] Failed to request to persist snapshot: {}",
+                        e
+                    );
+                    //todo: not sure if panic is the best way out. but it looks like irrecoverable situation
+                    panic!("Failed to request to persist snapshot. This might indicate that persistent thread is dead. Reason:{}", e);
                 }
             }
         }
@@ -153,7 +159,7 @@ impl Engine {
         storage: SnaphotableStorage,
         wal_path: &Path,
         partitions_path: &Path,
-    ) -> io::Result<Self> {
+    ) -> Result<Self> {
         let mut iter = WalBlockReader::read(wal_path)?.into_iter();
         let mut storage = Engine::new(storage, wal_path, partitions_path)?;
         loop {
@@ -222,7 +228,7 @@ impl PartitionWorker {
         }
     }
 
-    fn roll_partition(&mut self) -> io::Result<()> {
+    fn roll_partition(&mut self) -> Result<()> {
         let r = self.snapshot.read();
         self.partition_manager.roll_new_partition(&*r).map(|_| ()) //todo: handle failure
     }
@@ -230,11 +236,10 @@ impl PartitionWorker {
 
 #[cfg(test)]
 mod test {
-    use std::io::BufRead;
 
     use super::*;
     #[test]
-    fn simple_test() -> io::Result<()> {
+    fn simple_test() -> Result<()> {
         let file = tempfile::NamedTempFile::new().unwrap();
         let tempdir = tempfile::tempdir().unwrap();
 
@@ -259,7 +264,7 @@ mod test {
     }
 
     #[test]
-    fn test_restore_from_wal() -> io::Result<()> {
+    fn test_restore_from_wal() -> Result<()> {
         let file = tempfile::NamedTempFile::new().unwrap();
         let tempdir = tempfile::tempdir().unwrap();
 
@@ -288,7 +293,7 @@ mod test {
     }
 
     #[test]
-    fn test_restore_from_corrupt_wall() -> io::Result<()> {
+    fn test_restore_from_corrupt_wall() -> Result<()> {
         let file = tempfile::NamedTempFile::new().unwrap();
         let tempdir = tempfile::tempdir().unwrap();
 

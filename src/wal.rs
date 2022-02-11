@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::{fs, io::Write};
@@ -12,12 +13,13 @@ pub struct Wal {
 impl Wal {
     const MAX_DIRTY_BYTES: usize = 1024 * 1024; //todo make configurable
 
-    pub fn new(path: &Path) -> io::Result<Self> {
+    pub fn new(path: &Path) -> Result<Self> {
         let log = fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
-            .open(path)?;
+            .open(path)
+            .with_context(|| format!("write ahead log path: {:?}", path))?;
         Ok(Wal {
             file_name: path.to_path_buf(),
             log,
@@ -25,7 +27,7 @@ impl Wal {
         })
     }
 
-    pub fn from_position(path: &Path, position: u64) -> io::Result<Self> {
+    pub fn from_position(path: &Path, position: u64) -> Result<Self> {
         let mut wal = Wal::new(path)?;
         wal.log.seek(io::SeekFrom::Start(position))?;
         Ok(wal)
@@ -37,14 +39,14 @@ impl Wal {
         hasher.finalize()
     }
 
-    pub fn flush_and_sync(&mut self) -> io::Result<()> {
+    pub fn flush_and_sync(&mut self) -> Result<()> {
         self.log.flush()?;
         self.log.sync_all()?;
         self.dirty_bytes = 0;
         Ok(())
     }
 
-    pub fn write(&mut self, block: &[u8]) -> io::Result<()> {
+    pub fn write(&mut self, block: &[u8]) -> Result<()> {
         let crc32 = Wal::crc32(block);
         self.log.write_all(&(block.len() as u64).to_le_bytes())?;
         self.log.write_all(&crc32.to_le_bytes())?;
@@ -56,20 +58,22 @@ impl Wal {
         Ok(())
     }
 
-    pub fn truncate(&mut self, position: u64) -> io::Result<()> {
+    pub fn truncate(&mut self, position: u64) -> Result<()> {
         self.log.seek(io::SeekFrom::Start(position))?;
         self.log.set_len(position)?;
         self.log.sync_all()?;
         Ok(())
     }
 
-    pub fn log_position(&mut self) -> io::Result<u64> {
+    pub fn log_position(&mut self) -> Result<u64> {
         self.flush_and_sync()?;
-        self.log.seek(SeekFrom::Current(0))
+        self.log
+            .seek(SeekFrom::Current(0))
+            .with_context(|| "failed to seek to current log position")
     }
 
     #[cfg(test)]
-    pub fn corrupt_last_record(&mut self) -> io::Result<()> {
+    pub fn corrupt_last_record(&mut self) -> Result<()> {
         self.log.seek(io::SeekFrom::End(-3))?;
         self.log.set_len(self.log.metadata()?.len() - 3)?;
         self.log.flush()?;
@@ -78,7 +82,7 @@ impl Wal {
     }
 
     #[cfg(test)]
-    fn corrupt_last_block_crc32(&mut self, last_block_size: i64) -> io::Result<()> {
+    fn corrupt_last_block_crc32(&mut self, last_block_size: i64) -> Result<()> {
         self.log.seek(io::SeekFrom::End(-last_block_size - 4))?;
         self.log.write_all(&[0; 4])?;
         self.log.seek(io::SeekFrom::End(0))?;
@@ -87,7 +91,7 @@ impl Wal {
         Ok(())
     }
 
-    pub fn roll_new_segment(&mut self, log_position: usize) -> io::Result<u64> {
+    pub fn roll_new_segment(&mut self, log_position: usize) -> Result<u64> {
         //todo: check if pending exists
         self.flush_and_sync()?;
         let file_name: String = self.filename();
@@ -108,7 +112,7 @@ impl Wal {
     fn filename(&self) -> String {
         self.file_name.to_str().unwrap().to_string() //todo: unwrap
     }
-    pub fn drop_pending(&mut self, position: u64) -> io::Result<()> {
+    pub fn drop_pending(&mut self, position: u64) -> Result<()> {
         let filename = self.filename();
         fs::remove_file(dbg!(format!("{filename}.pending_{position}")))?;
         Ok(())
@@ -123,7 +127,7 @@ pub struct WalBlockReader {
 }
 
 impl WalBlockReader {
-    pub fn read(path: &Path) -> io::Result<WalBlockReader> {
+    pub fn read(path: &Path) -> Result<WalBlockReader> {
         let log = fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -134,7 +138,7 @@ impl WalBlockReader {
         let header_buf = [u8::default(); 8 + 4];
         let block_max_size = 10 * 1024 * 1024 * 1024; //10 MiB
         let buf = vec![0; block_max_size];
-        io::Result::Ok(WalBlockReader {
+        Result::Ok(WalBlockReader {
             reader,
             buf,
             header_buf,
@@ -342,7 +346,7 @@ mod test {
     }
 
     #[test]
-    fn corrupt_wal_log() -> Result<(), io::Error> {
+    fn corrupt_wal_log() -> Result<()> {
         let file = tempfile::NamedTempFile::new()?;
 
         let mut wal = Wal::new(file.path())?;
@@ -377,7 +381,7 @@ mod test {
     }
 
     #[test]
-    fn blocks_with_invalid_crc32_should_be_skipped() -> io::Result<()> {
+    fn blocks_with_invalid_crc32_should_be_skipped() -> Result<()> {
         let file = tempfile::NamedTempFile::new()?;
 
         let mut wal = Wal::new(file.path())?;

@@ -3,7 +3,7 @@ use lalrpop_util::lalrpop_mod;
 mod ast;
 pub mod query_engine;
 
-lalrpop_mod!(pub sqlparser, "/sql/parser.rs");
+lalrpop_mod!(#[allow(clippy::all)] pub sqlparser, "/sql/parser.rs");
 
 #[cfg(test)]
 mod test {

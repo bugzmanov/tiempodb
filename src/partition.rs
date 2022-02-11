@@ -1,4 +1,5 @@
 use crate::storage::DataPoint;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -81,7 +82,7 @@ impl PartitionWriter {
     pub fn write_partition(
         path: &Path,
         data: &HashMap<Arc<str>, Vec<DataPoint>>,
-    ) -> io::Result<Partition> {
+    ) -> Result<Partition> {
         let file = fs::OpenOptions::new().write(true).create(true).open(path)?;
 
         let zstd_level = zstd::compression_level_range()
@@ -128,7 +129,7 @@ impl PartitionReader {
     pub fn read_partition(
         path: &Path,
         partition: &Partition,
-    ) -> io::Result<HashMap<Arc<str>, Vec<DataPoint>>> {
+    ) -> Result<HashMap<Arc<str>, Vec<DataPoint>>> {
         let file = fs::OpenOptions::new()
             .read(true)
             .write(false)
@@ -169,14 +170,16 @@ pub struct PartitionManager {
 }
 
 impl PartitionManager {
-    pub fn new(partitions_dir: &Path) -> io::Result<Self> {
+    pub fn new(partitions_dir: &Path) -> Result<Self> {
         let mut manager = PartitionManager {
             partitions_dir: partitions_dir.to_path_buf(),
             last_partition_id: 0,
             partitions: Vec::new(), //todo: unnecessary allocation
         };
 
-        let mut existing_partitions = manager.list_partitions()?;
+        let mut existing_partitions = manager
+            .list_partitions()
+            .with_context(|| format!("Paritions directory: {:?}", partitions_dir))?;
         if !existing_partitions.is_empty() {
             existing_partitions.sort_by_key(|kv| kv.0);
             manager.last_partition_id = existing_partitions.last().unwrap().0;
@@ -201,11 +204,11 @@ impl PartitionManager {
             .join(format!("partition_{partition_id}.meta"))
     }
 
-    fn try_recover(&mut self, partition_id: usize) -> io::Result<bool> {
+    fn try_recover(&mut self, partition_id: usize) -> Result<bool> {
         let tmp_data_file = self.tmp_data_file(partition_id);
         let data_file = self.data_file(partition_id);
-        let meta_fila = self.meta_file(partition_id);
-        if !fs::try_exists(meta_fila)? {
+        let meta_file = self.meta_file(partition_id);
+        if !fs::try_exists(meta_file)? {
             return Ok(false);
         }
         if fs::try_exists(&data_file)? {
@@ -225,13 +228,14 @@ impl PartitionManager {
         ignore_not_found(fs::remove_file(self.meta_file(partition_id)))
     }
 
-    fn list_partitions(&self) -> io::Result<Vec<(usize, Partition)>> {
+    fn list_partitions(&self) -> Result<Vec<(usize, Partition)>> {
         let mut result = Vec::new();
         for dir_entry_res in fs::read_dir(&self.partitions_dir)? {
             let dir_entry = dir_entry_res?;
             let file_name = if let Ok(file) = dir_entry.file_name().into_string() {
                 file
             } else {
+                log::warn!("Skipping file {:?}", dir_entry.file_name());
                 continue;
             };
 
@@ -268,7 +272,7 @@ impl PartitionManager {
     pub fn roll_new_partition(
         &mut self,
         metrics: &HashMap<Arc<str>, Vec<DataPoint>>,
-    ) -> io::Result<&Partition> {
+    ) -> Result<&Partition> {
         let next_partition_id = self.last_partition_id + 1;
         let tmp_partition_file = self.tmp_data_file(next_partition_id);
         let metadata_file = self.meta_file(next_partition_id);
@@ -280,7 +284,8 @@ impl PartitionManager {
                 self.last_partition_id = next_partition_id;
                 return self.roll_new_partition(metrics);
             }
-            self.remove_partition_if_exists(next_partition_id)?;
+            self.remove_partition_if_exists(next_partition_id)
+                .with_context(|| format!("failed to remove partition {}", next_partition_id))?;
         }
 
         fail::fail_point!("pm-roll-write-meta-step", |_| {
@@ -288,7 +293,8 @@ impl PartitionManager {
         });
         let new_partition = PartitionWriter::write_partition(&tmp_partition_file, metrics)?;
 
-        PartitionManager::save_meta(&metadata_file, &new_partition)?;
+        PartitionManager::save_meta(&metadata_file, &new_partition)
+            .with_context(|| format!("failed to save partitions metadata {:?}", &metadata_file))?;
         fail::fail_point!("pm-roll-rename-step", |_| {
             Err(io::Error::new(io::ErrorKind::TimedOut, "error"))
         });
@@ -299,7 +305,7 @@ impl PartitionManager {
         Ok(self.partitions.last().unwrap())
     }
 
-    fn save_meta(path: &Path, partition: &Partition) -> io::Result<()> {
+    fn save_meta(path: &Path, partition: &Partition) -> Result<()> {
         let json = serde_json::to_string(partition)?;
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -309,23 +315,18 @@ impl PartitionManager {
         file.write_all(json.as_bytes())?;
         file.flush()?;
         file.sync_all()
+            .with_context(|| format!("Failed to save partition metadata to path {:?}", path))
     }
 
-    //todo introduce anyhow
-    fn load_meta(path: &Path) -> io::Result<Partition> {
+    fn load_meta(path: &Path) -> Result<Partition> {
         let file = fs::OpenOptions::new().read(true).open(path)?;
         let file_size = file.metadata()?.len() as usize;
         let mut reader = io::BufReader::new(file);
         let mut data = Vec::with_capacity(file_size);
         reader.read_to_end(&mut data)?;
 
-        match String::from_utf8(data) {
-            Ok(data_str) => match serde_json::from_str::<Partition>(&data_str) {
-                Ok(partition) => Ok(partition),
-                Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
-            },
-            Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
-        }
+        serde_json::from_str::<Partition>(std::str::from_utf8(&data)?)
+            .with_context(|| format!("failed to load partition metadata from {:?}", path))
     }
 }
 
@@ -362,7 +363,7 @@ mod test {
     }
 
     #[test]
-    fn test_partition_read_write() -> io::Result<()> {
+    fn test_partition_read_write() -> Result<()> {
         let file = tempfile::NamedTempFile::new()?;
 
         let mut data = generate_metrics_batch("");
@@ -375,7 +376,7 @@ mod test {
     }
 
     #[test]
-    fn test_partion_meta_write_read() -> io::Result<()> {
+    fn test_partion_meta_write_read() -> Result<()> {
         let file = tempfile::NamedTempFile::new()?;
 
         let mut partition = Partition::new();
@@ -422,7 +423,7 @@ mod test {
 
     #[test]
     #[cfg(not(feature = "fail/failpoints"))]
-    fn test_roll_new_partition() -> io::Result<()> {
+    fn test_roll_new_partition() -> Result<()> {
         let tempdir = tempfile::tempdir().unwrap();
         let mut manager = PartitionManager::new(&tempdir.path())?;
         let mut metrics = generate_metrics_batch("first");
@@ -468,7 +469,7 @@ mod test {
 
     #[test]
     #[cfg(feature = "fail/failpoints")]
-    fn test_recoverable_partition_failure() -> io::Result<()> {
+    fn test_recoverable_partition_failure() -> Result<()> {
         let scenario = FailScenario::setup();
         fail::cfg("pm-roll-rename-step", "return").unwrap();
 
@@ -503,7 +504,7 @@ mod test {
 
     #[test]
     #[cfg(feature = "fail/failpoints")]
-    fn test_partition_failure_data_loss() -> io::Result<()> {
+    fn test_partition_failure_data_loss() -> Result<()> {
         let scenario = FailScenario::setup();
         fail::cfg("pm-roll-write-meta-step", "return").unwrap();
 

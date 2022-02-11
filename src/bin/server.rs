@@ -1,29 +1,74 @@
-use anyhow::{anyhow, bail, Context};
+use anyhow::{anyhow, Context};
 use crossbeam::channel;
 use futures::stream::StreamExt;
 use hyper::{Body, Server};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::error::Error;
-use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
 use tiempodb::sql::query_engine::QueryEngine;
 
 pub type Response = hyper::Response<Body>;
 pub type Request = hyper::Request<Body>;
 
+struct ServerConfig {
+    bind: String,
+    storage: StorageConfig,
+}
+
+struct StorageConfig {
+    data_path: String,
+    wal_path: String,
+}
+
 fn main() {
     env_logger::init();
     log::info!("starting tiempodb web service");
+
+    let config = ServerConfig {
+        bind: "127.0.0.1:8085".into(),
+        storage: StorageConfig {
+            data_path: "/Users/rafaelbagmanov/workspace/tmp/tiempo/data".into(),
+            wal_path: "/Users/rafaelbagmanov/workspace/tmp/tiempo/wal".into(),
+        },
+    };
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_name("tiempodb-serve")
         .thread_stack_size(1024 * 1024)
         .enable_all()
         .build()
         .expect("tokio runtime");
-    let (sender, receiver) = crossbeam::channel::unbounded(); //todo unbounded
+
+    let (sender, receiver) = crossbeam::channel::unbounded::<String>(); //todo unbounded
+
+    let storage = tiempodb::storage::SnaphotableStorage::new();
+    let mut ingest_engine = tiempodb::ingest::Engine::new(
+        storage,
+        &std::path::Path::new(&config.storage.wal_path),
+        &std::path::Path::new(&config.storage.data_path),
+    )
+    .expect("storage engine startup");
+
+    std::thread::spawn(move || {
+        while (true) {
+            let data = receiver
+                .recv()
+                .expect("Can't read data from server, this means that producing service is down");
+            match ingest_engine.ingest(&data) {
+                Ok(r) => {
+                    log::debug!("om-nom-nom!")
+                    /* do nothing */
+                }
+                Err(e) => {
+                    log::error!("failed to ingest infludb line {}", e);
+                    todo!("somehow we need to get this back to the user")
+                }
+            }
+        }
+    });
+
     let tiempo_server = Arc::new(TiempoServer::new(sender));
-    let service = hyper::service::make_service_fn(move |connection| {
+    let service = hyper::service::make_service_fn(move |_conn| {
         let server = tiempo_server.clone();
         async move {
             Ok::<_, std::convert::Infallible>(hyper::service::service_fn(move |request| {
@@ -40,7 +85,7 @@ fn main() {
 
     runtime
         .block_on(async {
-            let serve = Server::bind(&("127.0.0.1:8085".parse().expect("hardcoded bind address")))
+            let serve = Server::bind(&(config.bind.parse().expect("hardcoded bind address")))
                 .serve(service);
             log::info!("Start serving requests");
             serve.await
@@ -95,6 +140,7 @@ impl TiempoServer {
         }
     }
 
+    // todo: multiline json values in case of errors is not OK with the spec
     async fn tick(&self, req: Request) -> Result<Response, String> {
         match *req.method() {
             hyper::Method::POST if req.uri().path().starts_with("/query") => {
@@ -113,7 +159,7 @@ impl TiempoServer {
     }
 
     async fn put(&self, req: Request) -> Result<Response, String> {
-        // let query = parse_query(req.uri().query()); //todo: bucket, org, resolution
+        let _query = parse_query(req.uri().query()); //todo: bucket, org, resolution
         let headers = req.headers();
         if let Some(_encoding) = headers.get(hyper::header::CONTENT_ENCODING) {
             //todo: encoding value check
@@ -214,7 +260,7 @@ impl LinesIterator {
             }
         }
 
-        return None;
+        None
     }
 }
 

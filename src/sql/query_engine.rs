@@ -57,7 +57,7 @@ impl QueryEngine {
             results: vec![StatementSeries {
                 statement_id: "0".into(),
                 series: vec![Series {
-                    name: "logins.count".into(),
+                    name: query.from,
                     tags: collection!["hostname".into() => "10.1.100.1".into()],
                     columns: vec!["time".into(), "mean".into()],
                     values: vec![
