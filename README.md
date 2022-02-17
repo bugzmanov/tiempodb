@@ -18,8 +18,7 @@ Ideas:
     * 
 * NO mmap to support more stable latency and performance
     * http://cidrdb.org/cidr2022/papers/p13-crotty.pdf
-    * Use tiny_lfu (at least for index blocks):
-        * https://arxiv.org/abs/1512.00727 
+    * 
 * Fuzzy testing of storage engine:
     * https://fuzzcheck.neocities.org/
     * https://github.com/loiclec/fuzzcheck-rs
@@ -28,9 +27,10 @@ Ideas:
 * Use zerocopy for parsing:
     * https://docs.rs/zerocopy/latest/zerocopy/
 
-* Try MemtableTrie ? 
-    * https://github.com/blambov/cassandra/blob/CASSANDRA-17240/src/java/org/apache/cassandra/db/tries/MemtableTrie.md
-
+* Structures to to try  
+    * MemtableTrie https://github.com/blambov/cassandra/blob/CASSANDRA-17240/src/java/org/apache/cassandra/db/tries/MemtableTrie.md
+    * Storage FLSM: https://www.cs.utexas.edu/~vijay/papers/sosp17-pebblesdb.pdf
+    * Indexes: tiny_lfu:  https://arxiv.org/abs/1512.00727 
 * Set up benches:
     * https://github.com/BurntSushi/cargo-benchcmp
     * https://docs.rs/dhat/latest/dhat/

@@ -3,16 +3,16 @@ use crate::protocol;
 use crate::storage;
 use crate::storage::DataPoint;
 use crate::storage::SnaphotableStorage;
-use crate::storage::Storage;
+use crate::storage::StorageWriter;
 use crate::wal::Wal;
 use crate::wal::WalBlockReader;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use crossbeam::channel;
 use crossbeam::channel::SendError;
 use crossbeam::channel::TryRecvError;
+use parking_lot::lock_api::RwLockUpgradableReadGuard;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use streaming_iterator::StreamingIterator;
@@ -103,6 +103,11 @@ impl Engine {
             #[cfg(test)]
             worker,
         })
+    }
+
+    //todo: bad place for this
+    pub fn time_tick(&mut self) {
+        self.storage.make_snapshot();
     }
 
     //todo: ingest multi-line
@@ -229,8 +234,16 @@ impl PartitionWorker {
     }
 
     fn roll_partition(&mut self) -> Result<()> {
-        let r = self.snapshot.read();
-        self.partition_manager.roll_new_partition(&*r).map(|_| ()) //todo: handle failure
+        let r = self.snapshot.upgradable_read();
+        // let r = self.snapshot.read();
+        self.partition_manager.roll_new_partition(&*r)?;
+        let mut w = RwLockUpgradableReadGuard::<
+            '_,
+            parking_lot::RawRwLock,
+            HashMap<Arc<str>, Vec<DataPoint>>,
+        >::upgrade(r);
+        std::mem::take(&mut *w);
+        Ok(())
     }
 }
 
@@ -251,7 +264,9 @@ mod test {
         let line2_str =
             "weather,location=us-midwest,country=us temperature=2,humidity=3 1465839830100400201";
         engine.ingest(&line2_str)?;
-        let metrics = engine.storage.load_locked("weather:temperature");
+
+        engine.storage.make_snapshot();
+        let metrics = engine.storage.load_from_snapshot("weather:temperature");
 
         assert_eq!(
             metrics
@@ -280,7 +295,8 @@ mod test {
         storage = storage::SnaphotableStorage::new();
         engine = Engine::restore_from_wal(storage, file.path(), tempdir.path())?;
 
-        let metrics = engine.storage.load_locked("weather:temperature");
+        engine.storage.make_snapshot();
+        let metrics = engine.storage.load_from_snapshot("weather:temperature");
 
         assert_eq!(
             metrics
@@ -311,7 +327,8 @@ mod test {
         let storage = storage::SnaphotableStorage::new();
         let mut engine = Engine::restore_from_wal(storage, file.path(), tempdir.path())?;
 
-        let metrics = engine.storage.load_locked("weather:temperature");
+        engine.storage.make_snapshot();
+        let metrics = engine.storage.load_from_snapshot("weather:temperature");
 
         assert_eq!(
             metrics
@@ -329,7 +346,8 @@ mod test {
         let storage = storage::SnaphotableStorage::new();
         let mut engine = Engine::restore_from_wal(storage, file.path(), tempdir.path())?;
 
-        let metrics = engine.storage.load_locked("weather:temperature");
+        engine.storage.make_snapshot();
+        let metrics = engine.storage.load_from_snapshot("weather:temperature");
 
         assert_eq!(
             metrics

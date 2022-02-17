@@ -1,10 +1,14 @@
 use core::marker::PhantomData;
 use core::ops::Deref;
+use crossbeam::channel;
+use crossbeam::channel::SendError;
+use crossbeam::channel::TryRecvError;
 use fake::{Dummy, Fake};
 use parking_lot::lock_api::RawRwLock;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rand::Rng;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 struct FakeRc;
@@ -23,8 +27,6 @@ pub struct DataPoint {
     pub value: i64,
 }
 
-struct VecHold<'a>(Vec<&'a DataPoint>);
-
 impl DataPoint {
     pub fn new(name: Arc<str>, timestamp: u64, value: i64) -> Self {
         DataPoint {
@@ -41,26 +43,18 @@ impl PartialEq for DataPoint {
     }
 }
 
-pub trait Storage {
+type MetricsData = HashMap<Arc<str>, Vec<DataPoint>>;
+
+pub trait StorageWriter {
     fn add(&mut self, point: DataPoint);
     fn add_bulk(&mut self, points: &[DataPoint]);
-    fn load_unsafe(&self, metric_name: &str) -> Vec<&DataPoint>;
-    fn load<'a>(
-        &'a self,
-        metric_name: &str,
-    ) -> Box<dyn std::ops::Deref<Target = Vec<&'a DataPoint>> + 'a>;
-    fn active_set_size(&self) -> usize;
 }
 
-impl<'a> std::ops::Deref for VecHold<'a> {
-    type Target = Vec<&'a DataPoint>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
+pub trait StorageReader {
+    fn load(&self, metric_name: &str) -> Vec<&DataPoint>;
 }
 
-impl Storage for HashMap<Arc<str>, Vec<DataPoint>> {
+impl StorageWriter for MetricsData {
     fn add(&mut self, point: DataPoint) {
         if let Some(values) = self.get_mut(&point.name) {
             values.push(point);
@@ -74,7 +68,6 @@ impl Storage for HashMap<Arc<str>, Vec<DataPoint>> {
             return;
         }
         let mut curr = &points[0].name;
-        // let mut vector = self.map.get_mut(&points[0].name);
         let mut vector = match self.get_mut(&points[0].name) {
             Some(vec) => vec,
             None => create_for_key(self, curr),
@@ -90,42 +83,29 @@ impl Storage for HashMap<Arc<str>, Vec<DataPoint>> {
             }
         }
     }
+}
 
-    fn load_unsafe(&self, metric_name: &str) -> Vec<&DataPoint> {
+impl StorageReader for MetricsData {
+    fn load(&self, metric_name: &str) -> Vec<&DataPoint> {
         if let Some(data) = self.get(metric_name) {
             let mut result: Vec<&DataPoint> = data.iter().collect();
             result.sort_by_key(|metric| metric.timestamp);
             result
         } else {
-            // todo!("saasda")
             Vec::new()
         }
     }
+}
 
-    // fn load(&self, metric_name: &str) -> Vec<&DataPoint> {
-    fn load<'a>(
-        &'a self,
-        metric_name: &'_ str,
-    ) -> Box<dyn std::ops::Deref<Target = Vec<&'a DataPoint>> + 'a> {
-        if let Some(data) = self.get(metric_name) {
-            let mut result: Vec<&DataPoint> = data.iter().collect();
-            result.sort_by_key(|metric| metric.timestamp);
-            Box::new(Box::new(result))
-        } else {
-            // todo!("saasda")
-            Box::new(Box::new(Vec::new()))
-        }
-    }
-
-    fn active_set_size(&self) -> usize {
-        todo!("unimplemented")
-    }
+#[derive(Default)]
+pub struct StorageStat {
+    data_points_count: usize,
 }
 
 #[derive(Default)]
 pub struct MemoryStorage {
     stat: StorageStat,
-    map: HashMap<Arc<str>, Vec<DataPoint>>,
+    map: MetricsData,
 }
 
 fn create_for_key<'a, T: Default>(
@@ -144,18 +124,16 @@ impl MemoryStorage {
         }
     }
 
-    // fn create_for_key(&mut self, key: &Rc<str>) -> &mut Vec<DataPoint> {
-    //     self.map.insert(key.clone(), Vec::new());
-    //     self.map.get_mut(key).expect("getting after insert")
-    // }
+    pub fn active_set_size(&self) -> usize {
+        self.stat.data_points_count
+    }
+
+    fn load(&self, metric_name: &str) -> Vec<&DataPoint> {
+        self.map.load(metric_name)
+    }
 }
 
-#[derive(Default)]
-pub struct StorageStat {
-    data_points_count: usize,
-}
-
-impl Storage for MemoryStorage {
+impl StorageWriter for MemoryStorage {
     fn add(&mut self, point: DataPoint) {
         self.map.add(point);
         self.stat.data_points_count += 1;
@@ -164,24 +142,6 @@ impl Storage for MemoryStorage {
         self.map.add_bulk(points);
         self.stat.data_points_count += points.len();
     }
-
-    fn load(&self, metric_name: &str) -> Box<dyn std::ops::Deref<Target = Vec<&DataPoint>> + '_> {
-        self.map.load(metric_name)
-    }
-
-    fn load_unsafe(&self, metric_name: &str) -> Vec<&DataPoint> {
-        self.map.load_unsafe(metric_name)
-    }
-
-    fn active_set_size(&self) -> usize {
-        self.stat.data_points_count
-    }
-}
-
-#[derive(Default)]
-pub struct SnaphotableStorage {
-    snapshot: Arc<RwLock<HashMap<Arc<str>, Vec<DataPoint>>>>,
-    active: MemoryStorage,
 }
 
 pub struct OwningReadGuard<'a, R: RawRwLock, T: ?Sized> {
@@ -213,97 +173,47 @@ impl<'a, R: RawRwLock + 'a, T: ?Sized + 'a> Drop for OwningReadGuard<'a, R, T> {
     }
 }
 
+pub struct SnaphotableStorage {
+    snapshot: StorageSnapshot,
+    active: MemoryStorage,
+    outbox: crossbeam::channel::Sender<MetricsData>,
+}
+
 impl SnaphotableStorage {
     pub fn new() -> Self {
-        Self::default()
+        let (tasks_sender, tasks_receiver) = crossbeam::channel::unbounded();
+        let snapshot = StorageSnapshot::new(tasks_receiver);
+        SnaphotableStorage {
+            snapshot,
+            active: MemoryStorage::default(),
+            outbox: tasks_sender,
+        }
     }
 
     pub fn make_snapshot(&mut self) {
         let curr = std::mem::take(&mut self.active);
-        let mut write = self.snapshot.write();
-        let _ = std::mem::replace(&mut *write, curr.map);
-    }
-
-    pub fn snapshot(&self) -> parking_lot::RwLockReadGuard<'_, HashMap<Arc<str>, Vec<DataPoint>>> {
-        self.snapshot.read()
+        self.outbox.send(curr.map).unwrap(); //todo unwrap
+        #[cfg(test)]
+        self.snapshot.tick().unwrap(); //todo unwrap
     }
 
     pub fn share_snapshot(&self) -> Arc<RwLock<HashMap<Arc<str>, Vec<DataPoint>>>> {
-        self.snapshot.clone()
+        self.snapshot.snapshot.clone()
     }
 
-    fn load_from_snapshot(
+    pub fn load_from_snapshot(
         &self,
         metric_name: &str,
     ) -> OwningReadGuard<'_, parking_lot::RawRwLock, DataPoint> {
-        unsafe { self.snapshot.raw().lock_shared() };
-        let data = unsafe { &*self.snapshot.data_ptr() };
-        let points = data.load_unsafe(metric_name);
-
-        OwningReadGuard {
-            raw: unsafe { self.snapshot.raw() },
-            data: points,
-            marker: PhantomData,
-        }
+        self.snapshot.read(metric_name)
     }
 
-    pub fn load_locked(
-        &self,
-        metric_name: &str,
-    ) -> OwningReadGuard<'_, parking_lot::RawRwLock, DataPoint> {
-        let mut snapshot_vec = self.load_from_snapshot(metric_name);
-
-        let active_vec = self.active.load_unsafe(metric_name);
-        if snapshot_vec.is_empty() {
-            snapshot_vec.with_data(active_vec);
-            return snapshot_vec; //todo: don't need to hold the lock at this point
-        }
-
-        if active_vec.is_empty() {
-            return snapshot_vec;
-        }
-
-        let mut result = Vec::with_capacity(snapshot_vec.len() + active_vec.len());
-
-        let mut left_iter = snapshot_vec.iter();
-        let mut right_iter = active_vec.into_iter();
-
-        let mut left = left_iter.next();
-        let mut right = right_iter.next();
-
-        while left.is_some() || right.is_some() {
-            match (&mut left, &mut right) {
-                (&mut None, &mut None) => {} //do nothing
-                (left_item @ &mut Some(_), _r @ &mut None) => {
-                    result.push(*left_item.take().expect("shuld not happen"))
-                }
-                (_l @ &mut None, right_item @ &mut Some(_)) => {
-                    result.push(right_item.take().expect("should not hppen"))
-                }
-                (left_item @ &mut Some(_), right_item @ &mut Some(_)) => {
-                    if left_item.expect("").timestamp > right_item.as_ref().expect("").timestamp {
-                        result.push(right_item.take().expect("shuld not happen"));
-                    } else {
-                        result.push(left_item.take().expect("shuld not happen"));
-                    }
-                }
-            }
-
-            if left.is_none() {
-                left = left_iter.next();
-            }
-
-            if right.is_none() {
-                right = right_iter.next();
-            }
-        }
-
-        snapshot_vec.with_data(result);
-        snapshot_vec
+    pub fn active_set_size(&self) -> usize {
+        self.active.active_set_size()
     }
 }
 
-impl Storage for SnaphotableStorage {
+impl StorageWriter for SnaphotableStorage {
     fn add(&mut self, point: DataPoint) {
         self.active.add(point);
     }
@@ -311,70 +221,48 @@ impl Storage for SnaphotableStorage {
     fn add_bulk(&mut self, points: &[DataPoint]) {
         self.active.add_bulk(points);
     }
+}
 
-    fn load<'a>(
-        &'a self,
-        metric_name: &str,
-    ) -> Box<dyn std::ops::Deref<Target = Vec<&'a DataPoint>> + 'a> {
-        Box::new(self.load_locked(metric_name))
+struct StorageSnapshot {
+    snapshot: Arc<RwLock<MetricsData>>,
+    inbox: channel::Receiver<MetricsData>,
+}
+
+impl StorageSnapshot {
+    fn new(inbox: channel::Receiver<MetricsData>) -> Self {
+        StorageSnapshot {
+            snapshot: Arc::new(RwLock::new(MetricsData::default())),
+            inbox,
+        }
+    }
+    pub fn tick(&self) -> anyhow::Result<()> {
+        let mut data = self.inbox.recv()?;
+        let mut write = self.snapshot.write();
+        StorageSnapshot::merge_to_right(&mut data, &mut *write);
+        Ok(())
     }
 
-    fn active_set_size(&self) -> usize {
-        self.active.active_set_size()
+    fn merge_to_right(left: &mut MetricsData, right: &mut MetricsData) {
+        for (k, mut v) in left.into_iter() {
+            if let Some(list) = right.get_mut(k) {
+                list.append(&mut v);
+                list.sort_by_key(|m| m.timestamp); // todo: not sure if we need sorting that early
+            } else {
+                right.insert(k.clone(), v.drain(..).collect());
+            }
+        }
     }
 
-    fn load_unsafe(&self, metric_name: &str) -> Vec<&DataPoint> {
-        let read = self.snapshot.read();
+    fn read(&self, metric_name: &str) -> OwningReadGuard<'_, parking_lot::RawRwLock, DataPoint> {
+        unsafe { self.snapshot.raw().lock_shared() };
         let data = unsafe { &*self.snapshot.data_ptr() };
-        drop(read);
+        let points = data.load(metric_name);
 
-        let snapshot_vec = data.load_unsafe(metric_name);
-
-        let active_vec = self.active.load_unsafe(metric_name);
-        if snapshot_vec.is_empty() {
-            return active_vec;
+        OwningReadGuard {
+            raw: unsafe { self.snapshot.raw() },
+            data: points,
+            marker: PhantomData,
         }
-
-        if active_vec.is_empty() {
-            return snapshot_vec;
-        }
-
-        let mut result = Vec::with_capacity(snapshot_vec.len() + active_vec.len());
-
-        let mut left_iter = snapshot_vec.into_iter();
-        let mut right_iter = active_vec.into_iter();
-
-        let mut left = left_iter.next();
-        let mut right = right_iter.next();
-
-        while left.is_some() || right.is_some() {
-            match (&mut left, &mut right) {
-                (&mut None, &mut None) => {} //do nothing
-                (left_item @ &mut Some(_), _r @ &mut None) => {
-                    result.push(left_item.take().expect("shuld not happen"))
-                }
-                (_l @ &mut None, right_item @ &mut Some(_)) => {
-                    result.push(right_item.take().expect("should not hppen"))
-                }
-                (left_item @ &mut Some(_), right_item @ &mut Some(_)) => {
-                    if left_item.expect("").timestamp > right_item.as_ref().expect("").timestamp {
-                        result.push(right_item.take().expect("shuld not happen"));
-                    } else {
-                        result.push(left_item.take().expect("shuld not happen"));
-                    }
-                }
-            }
-
-            if left.is_none() {
-                left = left_iter.next();
-            }
-
-            if right.is_none() {
-                right = right_iter.next();
-            }
-        }
-
-        result
     }
 }
 
@@ -383,8 +271,6 @@ mod test {
     use super::*;
     use claim::{assert_none, assert_some};
     use fake::Faker;
-    // use claim::assert_none;
-    // use claim::assert_
 
     const METRIC_NAME: &str = "ololoev";
 
@@ -408,7 +294,7 @@ mod test {
         let point = data_point(METRIC_NAME);
         storage.add(point.clone());
         let loaded = storage.load(METRIC_NAME);
-        assert_eq!(***loaded, vec![&point]);
+        assert_eq!(loaded, vec![&point]);
     }
 
     fn is_ordered_by_time(points: &[&DataPoint]) -> bool {
@@ -424,28 +310,14 @@ mod test {
     }
 
     #[test]
-    fn test_loaded_metrics_must_be_sorted() {
-        let mut storage = MemoryStorage::new();
-        storage.add_bulk(&generate_data_points(METRIC_NAME, 4));
-
-        let result = storage.load(METRIC_NAME);
-
-        assert_eq!(4, result.len());
-        assert_eq!(true, is_ordered_by_time(&result));
-    }
-
-    #[test]
     fn snapshottable_should_return_ordered_from_both_sources() {
         let mut storage = SnaphotableStorage::new();
         storage.add_bulk(&generate_data_points(METRIC_NAME, 4));
+        storage.add_bulk(&generate_data_points(METRIC_NAME, 3));
 
         storage.make_snapshot();
 
-        storage.add_bulk(&generate_data_points(METRIC_NAME, 3));
-
-        assert_eq!(3, storage.active.load(METRIC_NAME).len());
-
-        let result = storage.load_locked(METRIC_NAME);
+        let result = storage.load_from_snapshot(METRIC_NAME);
 
         assert_eq!(7, result.len());
         assert_eq!(true, is_ordered_by_time(&result));
@@ -453,20 +325,22 @@ mod test {
 
     #[test]
     fn test_owning_read_guard() {
-        let mut storage = SnaphotableStorage::new();
-        storage.add_bulk(&generate_data_points(METRIC_NAME, 4));
+        let (tasks_sender, tasks_receiver) = crossbeam::channel::unbounded();
+        let snapshot = StorageSnapshot::new(tasks_receiver);
+        let mut data = HashMap::new();
+        data.insert(Arc::from(METRIC_NAME), generate_data_points(METRIC_NAME, 4));
+        tasks_sender.send(data).unwrap();
 
-        storage.make_snapshot();
+        snapshot.tick().unwrap();
 
-        let read_guard = storage.load_from_snapshot(METRIC_NAME);
-        assert_none!(storage.snapshot.try_write());
+        let read_guard = snapshot.read(METRIC_NAME);
+        assert_none!(snapshot.snapshot.try_write());
 
         assert_eq!(read_guard.len(), 4);
 
         drop(read_guard);
 
-        // #[allow(unused_must_use)]
-        let rw_lock = storage.snapshot.try_write();
+        let rw_lock = snapshot.snapshot.try_write();
         assert_some!(&rw_lock);
     }
 
@@ -477,21 +351,5 @@ mod test {
             point.name = metric.clone();
         }
         data_points
-    }
-
-    #[test]
-    fn read_from_two_sources_keeps_the_lock() {
-        let mut storage = SnaphotableStorage::new();
-        storage.add_bulk(&generate_data_points(METRIC_NAME, 4));
-
-        storage.make_snapshot();
-
-        storage.add_bulk(&generate_data_points(METRIC_NAME, 3));
-
-        let result = storage.load_locked(METRIC_NAME);
-        assert_eq!(7, result.len());
-        assert_eq!(true, is_ordered_by_time(&result));
-
-        assert_none!(storage.snapshot.try_write());
     }
 }

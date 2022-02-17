@@ -20,6 +20,11 @@ struct StorageConfig {
     wal_path: String,
 }
 
+enum StorageEvent {
+    Ingest(String),
+    TimeTick(channel::Sender<()>),
+}
+
 fn main() {
     env_logger::init();
     log::info!("starting tiempodb web service");
@@ -50,12 +55,12 @@ fn main() {
     .expect("storage engine startup");
 
     std::thread::spawn(move || {
-        while (true) {
+        loop {
             let data = receiver
                 .recv()
                 .expect("Can't read data from server, this means that producing service is down");
             match ingest_engine.ingest(&data) {
-                Ok(r) => {
+                Ok(_r) => {
                     log::debug!("om-nom-nom!")
                     /* do nothing */
                 }
