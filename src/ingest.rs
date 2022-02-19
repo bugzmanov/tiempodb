@@ -107,7 +107,17 @@ impl Engine {
 
     //todo: bad place for this
     pub fn time_tick(&mut self) {
+        log::error!(
+            "+++ {}/{}",
+            self.storage.active_set_size(),
+            self.storage.snapshot_set_size()
+        );
         self.storage.make_snapshot();
+        log::error!(
+            "!!! {}/{}",
+            self.storage.active_set_size(),
+            self.storage.snapshot_set_size()
+        );
     }
 
     //todo: ingest multi-line
@@ -173,6 +183,7 @@ impl Engine {
                 Some(v) => {
                     let str_block = unsafe { String::from_utf8_unchecked(Vec::from(v)) };
                     for str in str_block.split('\n') {
+                        log::error!("JOPA");
                         storage.save_to_storage(str)
                     }
                 }

@@ -2,10 +2,13 @@ use anyhow::{anyhow, Context};
 use crossbeam::channel;
 use futures::stream::StreamExt;
 use hyper::{Body, Server};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Duration;
 use tiempodb::sql::query_engine::QueryEngine;
+use tiempodb::storage::MetricsData;
 
 pub type Response = hyper::Response<Body>;
 pub type Request = hyper::Request<Body>;
@@ -25,9 +28,40 @@ enum StorageEvent {
     TimeTick(channel::Sender<()>),
 }
 
+const ACK: () = ();
+
+struct TimeTicker {
+    outbox: channel::Sender<StorageEvent>,
+    ack_receiver: channel::Receiver<()>,
+    ack_sender: channel::Sender<()>,
+    tick_cycle: Duration,
+}
+
+impl TimeTicker {
+    pub fn new(outbox: channel::Sender<StorageEvent>, duration: Duration) -> Self {
+        let (ack_sender, ack_receiver) = crossbeam::channel::unbounded::<()>(); //todo unbounded
+        TimeTicker {
+            outbox,
+            ack_receiver,
+            ack_sender,
+            tick_cycle: duration,
+        }
+    }
+
+    pub fn run(&self) {
+        loop {
+            std::thread::sleep(self.tick_cycle);
+            self.outbox
+                .send(StorageEvent::TimeTick(self.ack_sender.clone()))
+                .expect("Time tick events reciever is disconnected");
+            self.ack_receiver.recv().expect("should not happen"); //todo expect
+        }
+    }
+}
+
 fn main() {
     env_logger::init();
-    log::info!("starting tiempodb web service");
+    log::info!("starting tiempodb service");
 
     let config = ServerConfig {
         bind: "127.0.0.1:8085".into(),
@@ -44,10 +78,24 @@ fn main() {
         .build()
         .expect("tokio runtime");
 
-    let (sender, receiver) = crossbeam::channel::unbounded::<String>(); //todo unbounded
+    let (sender, receiver) = crossbeam::channel::unbounded::<StorageEvent>(); //todo unbounded
+
+    let time_ticker = TimeTicker::new(sender.clone(), Duration::from_secs(5));
+
+    std::thread::spawn(move || {
+        time_ticker.run();
+    });
 
     let storage = tiempodb::storage::SnaphotableStorage::new();
-    let mut ingest_engine = tiempodb::ingest::Engine::new(
+    let snapshot = storage.share_snapshot();
+    // let mut ingest_engine = tiempodb::ingest::Engine::new(
+    //     storage,
+    //     &std::path::Path::new(&config.storage.wal_path),
+    //     &std::path::Path::new(&config.storage.data_path),
+    // )
+    // .expect("storage engine startup");
+
+    let mut ingest_engine = tiempodb::ingest::Engine::restore_from_wal(
         storage,
         &std::path::Path::new(&config.storage.wal_path),
         &std::path::Path::new(&config.storage.data_path),
@@ -56,23 +104,29 @@ fn main() {
 
     std::thread::spawn(move || {
         loop {
-            let data = receiver
+            let msg = receiver
                 .recv()
                 .expect("Can't read data from server, this means that producing service is down");
-            match ingest_engine.ingest(&data) {
-                Ok(_r) => {
-                    log::debug!("om-nom-nom!")
-                    /* do nothing */
-                }
-                Err(e) => {
-                    log::error!("failed to ingest infludb line {}", e);
-                    todo!("somehow we need to get this back to the user")
+            match msg {
+                StorageEvent::Ingest(data) => match ingest_engine.ingest(&data) {
+                    Ok(_r) => {
+                        log::error!("om-nom-nom!")
+                        /* do nothing */
+                    }
+                    Err(e) => {
+                        log::error!("failed to ingest infludb line {}", e);
+                        todo!("somehow we need to get this back to the user")
+                    }
+                },
+                StorageEvent::TimeTick(sender) => {
+                    ingest_engine.time_tick();
+                    sender.send(ACK);
                 }
             }
         }
     });
 
-    let tiempo_server = Arc::new(TiempoServer::new(sender));
+    let tiempo_server = Arc::new(TiempoServer::new(sender, snapshot));
     let service = hyper::service::make_service_fn(move |_conn| {
         let server = tiempo_server.clone();
         async move {
@@ -124,7 +178,7 @@ pub struct Query {
 }
 
 struct TiempoServer {
-    engine: channel::Sender<String>,
+    engine: channel::Sender<StorageEvent>,
     query_engine: QueryEngine,
 }
 
@@ -138,10 +192,10 @@ fn parse_query(path_query: Option<&str>) -> Vec<(String, String)> {
 }
 
 impl TiempoServer {
-    fn new(engine: channel::Sender<String>) -> Self {
+    fn new(engine: channel::Sender<StorageEvent>, snapshot: Arc<RwLock<MetricsData>>) -> Self {
         TiempoServer {
             engine,
-            query_engine: QueryEngine::new(),
+            query_engine: QueryEngine::new(snapshot),
         }
     }
 
@@ -175,7 +229,7 @@ impl TiempoServer {
                 let result = match next_line {
                     Ok(line_sr) => self
                         .engine
-                        .send(line_sr)
+                        .send(StorageEvent::Ingest(line_sr))
                         .with_context(|| "failed to process incoming lines"), //todo: batching
                     Err(e) => Err(e).with_context(|| "failed to decode incoming lines"),
                 };
@@ -273,6 +327,7 @@ impl LinesIterator {
 mod test {
     use super::*;
 
+    use std::collections::HashMap;
     use tiempodb::sql::query_engine::QueryResult;
 
     #[test]
@@ -318,13 +373,20 @@ mod test {
             .unwrap();
 
         let (sender, receiver) = crossbeam::channel::unbounded();
-        let server = TiempoServer::new(sender);
+        let dumb_snapshot = Arc::new(RwLock::new(HashMap::default()));
+        let server = TiempoServer::new(sender, dumb_snapshot);
 
         let response = dbg!(tokio_test::block_on(server.tick(request)));
         assert_eq!(true, response.is_ok());
         assert_eq!(hyper::StatusCode::OK, response.unwrap().status());
 
-        let v: Vec<String> = receiver.try_iter().collect();
+        let v: Vec<String> = receiver
+            .try_iter()
+            .flat_map(|x| match x {
+                StorageEvent::Ingest(line) => Some(line),
+                _ => None,
+            })
+            .collect();
         assert_eq!(v, vec!["first_line", "second_line", "third_line"]);
     }
 
@@ -343,7 +405,8 @@ mod test {
             .unwrap();
 
         let (sender, _) = crossbeam::channel::unbounded();
-        let server = TiempoServer::new(sender);
+        let dumb_snapshot = Arc::new(RwLock::new(HashMap::default()));
+        let server = TiempoServer::new(sender, dumb_snapshot);
 
         let response = dbg!(tokio_test::block_on(server.tick(request)));
         assert_eq!(true, response.is_ok());
@@ -369,7 +432,8 @@ mod test {
             .unwrap();
 
         let (sender, _) = crossbeam::channel::unbounded();
-        let server = TiempoServer::new(sender);
+        let dumb_snapshot = Arc::new(RwLock::new(HashMap::default()));
+        let server = TiempoServer::new(sender, dumb_snapshot);
         let response = dbg!(tokio_test::block_on(server.tick(request)));
         assert_eq!(hyper::StatusCode::BAD_REQUEST, response.unwrap().status());
     }
@@ -384,7 +448,8 @@ mod test {
             .body(body.into())
             .unwrap();
         let (sender, _) = crossbeam::channel::unbounded();
-        let server = TiempoServer::new(sender);
+        let dumb_snapshot = Arc::new(RwLock::new(HashMap::default()));
+        let server = TiempoServer::new(sender, dumb_snapshot);
         let response = tokio_test::block_on(server.tick(request));
         assert_eq!(hyper::StatusCode::BAD_REQUEST, response.unwrap().status());
     }

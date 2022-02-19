@@ -1,14 +1,11 @@
 use core::marker::PhantomData;
 use core::ops::Deref;
 use crossbeam::channel;
-use crossbeam::channel::SendError;
-use crossbeam::channel::TryRecvError;
 use fake::{Dummy, Fake};
 use parking_lot::lock_api::RawRwLock;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use rand::Rng;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 struct FakeRc;
@@ -43,7 +40,7 @@ impl PartialEq for DataPoint {
     }
 }
 
-type MetricsData = HashMap<Arc<str>, Vec<DataPoint>>;
+pub type MetricsData = HashMap<Arc<str>, Vec<DataPoint>>;
 
 pub trait StorageWriter {
     fn add(&mut self, point: DataPoint);
@@ -52,6 +49,13 @@ pub trait StorageWriter {
 
 pub trait StorageReader {
     fn load(&self, metric_name: &str) -> Vec<&DataPoint>;
+}
+
+pub trait ProtectedStorageReader {
+    fn read_metrics(
+        &self,
+        metric_name: &str,
+    ) -> OwningReadGuard<'_, parking_lot::RawRwLock, DataPoint>;
 }
 
 impl StorageWriter for MetricsData {
@@ -174,19 +178,31 @@ impl<'a, R: RawRwLock + 'a, T: ?Sized + 'a> Drop for OwningReadGuard<'a, R, T> {
 }
 
 pub struct SnaphotableStorage {
-    snapshot: StorageSnapshot,
+    metrics_snap: Arc<RwLock<MetricsData>>,
     active: MemoryStorage,
     outbox: crossbeam::channel::Sender<MetricsData>,
+
+    #[cfg(test)]
+    snapshot: StorageSnapshot,
 }
 
 impl SnaphotableStorage {
     pub fn new() -> Self {
         let (tasks_sender, tasks_receiver) = crossbeam::channel::unbounded();
         let snapshot = StorageSnapshot::new(tasks_receiver);
+        let snap = snapshot.snapshot.clone();
+
+        #[cfg(not(test))]
+        std::thread::spawn(move || {
+            snapshot.run();
+        });
+
         SnaphotableStorage {
-            snapshot,
+            metrics_snap: snap,
             active: MemoryStorage::default(),
             outbox: tasks_sender,
+            #[cfg(test)]
+            snapshot: snapshot,
         }
     }
 
@@ -198,9 +214,10 @@ impl SnaphotableStorage {
     }
 
     pub fn share_snapshot(&self) -> Arc<RwLock<HashMap<Arc<str>, Vec<DataPoint>>>> {
-        self.snapshot.snapshot.clone()
+        self.metrics_snap.clone()
     }
 
+    #[cfg(test)]
     pub fn load_from_snapshot(
         &self,
         metric_name: &str,
@@ -210,6 +227,10 @@ impl SnaphotableStorage {
 
     pub fn active_set_size(&self) -> usize {
         self.active.active_set_size()
+    }
+
+    pub fn snapshot_set_size(&self) -> usize {
+        (*self.metrics_snap.read()).len()
     }
 }
 
@@ -223,9 +244,26 @@ impl StorageWriter for SnaphotableStorage {
     }
 }
 
-struct StorageSnapshot {
+pub struct StorageSnapshot {
     snapshot: Arc<RwLock<MetricsData>>,
     inbox: channel::Receiver<MetricsData>,
+}
+
+impl ProtectedStorageReader for RwLock<MetricsData> {
+    fn read_metrics(
+        &self,
+        metric_name: &str,
+    ) -> OwningReadGuard<'_, parking_lot::RawRwLock, DataPoint> {
+        unsafe { self.raw().lock_shared() };
+        let data = unsafe { &*self.data_ptr() };
+        let points = data.load(metric_name);
+
+        OwningReadGuard {
+            raw: unsafe { self.raw() },
+            data: points,
+            marker: PhantomData,
+        }
+    }
 }
 
 impl StorageSnapshot {
@@ -233,6 +271,12 @@ impl StorageSnapshot {
         StorageSnapshot {
             snapshot: Arc::new(RwLock::new(MetricsData::default())),
             inbox,
+        }
+    }
+
+    pub fn run(&self) {
+        loop {
+            self.tick().unwrap(); //todo: unwrap
         }
     }
     pub fn tick(&self) -> anyhow::Result<()> {
@@ -254,15 +298,20 @@ impl StorageSnapshot {
     }
 
     fn read(&self, metric_name: &str) -> OwningReadGuard<'_, parking_lot::RawRwLock, DataPoint> {
-        unsafe { self.snapshot.raw().lock_shared() };
-        let data = unsafe { &*self.snapshot.data_ptr() };
-        let points = data.load(metric_name);
+        self.snapshot.read_metrics(metric_name)
+        // unsafe { self.snapshot.raw().lock_shared() };
+        // let data = unsafe { &*self.snapshot.data_ptr() };
+        // let points = data.load(metric_name);
 
-        OwningReadGuard {
-            raw: unsafe { self.snapshot.raw() },
-            data: points,
-            marker: PhantomData,
-        }
+        // OwningReadGuard {
+        //     raw: unsafe { self.snapshot.raw() },
+        //     data: points,
+        //     marker: PhantomData,
+        // }
+    }
+
+    pub fn active_set_size(&self) -> usize {
+        (*self.snapshot.read()).len()
     }
 }
 

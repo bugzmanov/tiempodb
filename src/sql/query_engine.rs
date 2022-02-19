@@ -5,9 +5,13 @@ use crate::sql::ast::ShowMeasurementsQuery;
 use crate::sql::ast::ShowTagKeysQuery;
 use crate::sql::ast::ShowTagValuesQuery;
 use crate::sql::sqlparser::QueryParser;
+use crate::storage::MetricsData;
+use crate::storage::ProtectedStorageReader;
 use anyhow::{Context, Error};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 macro_rules! collection {
     // map-like
@@ -43,28 +47,56 @@ pub struct Series {
 
 pub struct QueryEngine {
     query_parser: QueryParser,
+    storage_snapshot: Arc<RwLock<MetricsData>>,
 }
 
 impl QueryEngine {
-    pub fn new() -> Self {
+    pub fn new(snapshot: Arc<RwLock<MetricsData>>) -> Self {
         QueryEngine {
             query_parser: QueryParser::new(),
+            storage_snapshot: snapshot,
         }
     }
 
     fn select_query(&self, query: SelectQuery) -> Result<QueryResult, Error> {
+        let mut table = HashMap::<u64, Vec<String>>::new();
+        let columns = query.fields.len();
+        let field_names: Vec<String> = query
+            .fields
+            .iter()
+            .map(|f| format!("{}:{}", query.from, f.field_name))
+            .collect();
+        for field_idx in 0..columns {
+            let metric_name = unsafe { field_names.get_unchecked(field_idx) };
+            for metric in self.storage_snapshot.read_metrics(&metric_name).iter() {
+                if !table.contains_key(&metric.timestamp) {
+                    let mut columns = Vec::with_capacity(columns + 1);
+                    columns.insert(0, metric.timestamp.to_string());
+                    table.insert(metric.timestamp, columns);
+                }
+                table
+                    .get_mut(&metric.timestamp)
+                    .unwrap() //todo: unwrap
+                    .insert(field_idx + 1, metric.value.to_string())
+            }
+        }
+
+        let mut columns_def = vec!["time".to_string()];
+        columns_def.extend(query.fields.iter().map(|f| f.field_name.to_string()));
+
         Ok(QueryResult {
             results: vec![StatementSeries {
                 statement_id: "0".into(),
                 series: vec![Series {
                     name: query.from,
                     tags: collection!["hostname".into() => "10.1.100.1".into()],
-                    columns: vec!["time".into(), "mean".into()],
-                    values: vec![
-                        vec!["1644150540000".into(), "609.8712651650578".into()],
-                        vec!["1644150600000".into(), "608.1835093669324".into()],
-                        vec!["1644150660000".into(), "609.9034402394105".into()],
-                    ],
+                    columns: columns_def,
+                    values: table.into_values().collect(),
+                    // ,vec![
+                    // vec!["1644150540000".into(), "609.8712651650578".into()],
+                    // vec!["1644150600000".into(), "608.1835093669324".into()],
+                    // vec!["1644150660000".into(), "609.9034402394105".into()],
+                    // ],
                 }],
             }],
         })
@@ -149,5 +181,31 @@ impl QueryEngine {
             Query::FieldKeys(query) => self.field_keys_query(query),
             Query::Measurements(query) => self.measurements_query(query),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::storage::{DataPoint, StorageWriter};
+
+    #[test]
+    fn basic_select_query() {
+        let snapshot = Arc::new(RwLock::new(HashMap::default()));
+        let mut write = snapshot.write();
+        (*write).add_bulk(&vec![DataPoint::new(
+            Arc::from("table1:metric1"),
+            100u64,
+            10i64,
+        )]);
+
+        drop(write);
+
+        let engine = QueryEngine::new(snapshot.clone());
+
+        let result = dbg!(engine
+            .run_query("SELECT \"metric1\", \"metric2\" FROM \"table1\"")
+            .unwrap());
+        assert_eq!(1, 2);
     }
 }
