@@ -88,12 +88,6 @@ fn main() {
 
     let storage = tiempodb::storage::SnaphotableStorage::new();
     let snapshot = storage.share_snapshot();
-    // let mut ingest_engine = tiempodb::ingest::Engine::new(
-    //     storage,
-    //     &std::path::Path::new(&config.storage.wal_path),
-    //     &std::path::Path::new(&config.storage.data_path),
-    // )
-    // .expect("storage engine startup");
 
     let mut ingest_engine = tiempodb::ingest::Engine::restore_from_wal(
         storage,
@@ -110,7 +104,7 @@ fn main() {
             match msg {
                 StorageEvent::Ingest(data) => match ingest_engine.ingest(&data) {
                     Ok(_r) => {
-                        log::error!("om-nom-nom!")
+                        log::debug!("om-nom-nom!")
                         /* do nothing */
                     }
                     Err(e) => {
@@ -120,7 +114,9 @@ fn main() {
                 },
                 StorageEvent::TimeTick(sender) => {
                     ingest_engine.time_tick();
-                    sender.send(ACK);
+                    sender
+                        .send(ACK)
+                        .expect("Should not happen. Means the sender got killed");
                 }
             }
         }

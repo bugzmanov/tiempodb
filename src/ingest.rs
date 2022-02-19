@@ -107,17 +107,7 @@ impl Engine {
 
     //todo: bad place for this
     pub fn time_tick(&mut self) {
-        log::error!(
-            "+++ {}/{}",
-            self.storage.active_set_size(),
-            self.storage.snapshot_set_size()
-        );
         self.storage.make_snapshot();
-        log::error!(
-            "!!! {}/{}",
-            self.storage.active_set_size(),
-            self.storage.snapshot_set_size()
-        );
     }
 
     //todo: ingest multi-line
@@ -165,8 +155,12 @@ impl Engine {
                     let data_point =
                         storage::DataPoint::new(rc_name.clone(), line.timestamp, int_value);
                     self.storage.add(data_point);
+                } else {
+                    log::error!("failed to parse {}", line_str);
                 }
             }
+        } else {
+            log::error!("Failed to parse {}", line_str);
         }
     }
 
@@ -183,7 +177,6 @@ impl Engine {
                 Some(v) => {
                     let str_block = unsafe { String::from_utf8_unchecked(Vec::from(v)) };
                     for str in str_block.split('\n') {
-                        log::error!("JOPA");
                         storage.save_to_storage(str)
                     }
                 }

@@ -139,6 +139,7 @@ impl Line {
         LineFieldIter::new(self)
     }
 
+    //todo: change to Error
     pub fn parse(line: &[u8]) -> Option<Line> {
         let size = line.len();
         let data = Vec::from(line);

@@ -70,26 +70,27 @@ impl QueryEngine {
             let metric_name = unsafe { field_names.get_unchecked(field_idx) };
             for metric in self.storage_snapshot.read_metrics(&metric_name).iter() {
                 if !table.contains_key(&metric.timestamp) {
-                    let mut columns = Vec::with_capacity(columns + 1);
-                    columns.insert(0, metric.timestamp.to_string());
+                    let mut columns = vec!["null".to_string(); columns + 1];
+                    columns[0] = metric.timestamp.to_string();
                     table.insert(metric.timestamp, columns);
                 }
-                table
-                    .get_mut(&metric.timestamp)
-                    .unwrap() //todo: unwrap
-                    .insert(field_idx + 1, metric.value.to_string())
+                //todo: unwrap
+                table.get_mut(&metric.timestamp).unwrap()[field_idx + 1] = metric.value.to_string();
             }
+        }
+        let mut tags = HashMap::new();
+        for tag in query.where_constraints.iter() {
+            tags.insert(tag.source.clone(), tag.value.clone());
         }
 
         let mut columns_def = vec!["time".to_string()];
         columns_def.extend(query.fields.iter().map(|f| f.field_name.to_string()));
-
         Ok(QueryResult {
             results: vec![StatementSeries {
                 statement_id: "0".into(),
                 series: vec![Series {
                     name: query.from,
-                    tags: collection!["hostname".into() => "10.1.100.1".into()],
+                    tags: tags,
                     columns: columns_def,
                     values: table.into_values().collect(),
                     // ,vec![
@@ -193,19 +194,40 @@ mod test {
     fn basic_select_query() {
         let snapshot = Arc::new(RwLock::new(HashMap::default()));
         let mut write = snapshot.write();
-        (*write).add_bulk(&vec![DataPoint::new(
-            Arc::from("table1:metric1"),
-            100u64,
-            10i64,
-        )]);
+        (*write).add_bulk(&vec![
+            DataPoint::new(Arc::from("table1:metric1"), 100u64, 10i64),
+            DataPoint::new(Arc::from("table1:metric1"), 101u64, 12i64),
+        ]);
 
         drop(write);
 
         let engine = QueryEngine::new(snapshot.clone());
 
-        let result = dbg!(engine
-            .run_query("SELECT \"metric1\", \"metric2\" FROM \"table1\"")
+        let mut result = dbg!(engine
+            .run_query(
+                "SELECT \"metric1\", \"metric2\" FROM \"table1\" WHERE \"host\"=\"localhost\""
+            )
             .unwrap());
-        assert_eq!(1, 2);
+
+        assert_eq!(1, result.results.len());
+        assert_eq!(1, result.results[0].series.len());
+        let metrics = result
+            .results
+            .first_mut()
+            .unwrap()
+            .series
+            .first_mut()
+            .unwrap();
+        assert_eq!(metrics.name, "table1");
+        assert_eq!(metrics.columns, vec!("time", "metric1", "metric2"));
+        metrics.values.sort_by_key(|v| v[0].parse::<u64>().unwrap());
+        assert_eq!(
+            metrics.values,
+            vec![vec!["100", "10", "null"], vec!["101", "12", "null"]]
+        );
+        assert_eq!(
+            metrics.tags,
+            collection!["host".to_string() => "localhost".to_string()]
+        );
     }
 }

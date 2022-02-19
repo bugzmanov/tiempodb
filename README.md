@@ -2,6 +2,14 @@ Goals:
 * InfluxDB compatible line protocol
 * InfluxDB compatible query language (to be supported by grafana)
 
+Immidiate Todo:
+- [] multi type for metrics
+- [] labels for metrics
+- [] fix TODOs
+- [] consistent error handling with anyhow
+- [] query engine execution
+- [] index for labels
+
 Plan: 
 - [ ] WAL
    - [ ] Ingestion
