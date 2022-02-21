@@ -3,12 +3,12 @@ Goals:
 * InfluxDB compatible query language (to be supported by grafana)
 
 Immidiate Todo:
-- [] multi type for metrics
-- [] labels for metrics
-- [] fix TODOs
-- [] consistent error handling with anyhow
-- [] query engine execution
-- [] index for labels
+- [x] multi type for metrics
+- [ ] labels for metrics
+- [ ] fix TODOs
+- [ ] consistent error handling with anyhow
+- [ ] query engine execution
+- [ ] index for labels
 
 Plan: 
 - [ ] WAL
@@ -35,7 +35,7 @@ Ideas:
 * Use zerocopy for parsing:
     * https://docs.rs/zerocopy/latest/zerocopy/
 
-* Structures to to try  
+* Structures to to try
     * MemtableTrie https://github.com/blambov/cassandra/blob/CASSANDRA-17240/src/java/org/apache/cassandra/db/tries/MemtableTrie.md
     * Storage FLSM: https://www.cs.utexas.edu/~vijay/papers/sosp17-pebblesdb.pdf
     * Indexes: tiny_lfu:  https://arxiv.org/abs/1512.00727 

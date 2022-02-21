@@ -16,16 +16,16 @@ impl Dummy<FakeRc> for Arc<str> {
     }
 }
 
-#[derive(Clone, Debug, Eq, Dummy)]
+#[derive(Clone, Debug, Dummy)]
 pub struct DataPoint {
     #[dummy(faker = "FakeRc")]
     pub name: Arc<str>,
     pub timestamp: u64,
-    pub value: i64,
+    pub value: f64,
 }
 
 impl DataPoint {
-    pub fn new(name: Arc<str>, timestamp: u64, value: i64) -> Self {
+    pub fn new(name: Arc<str>, timestamp: u64, value: f64) -> Self {
         DataPoint {
             name,
             timestamp,

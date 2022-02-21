@@ -152,7 +152,7 @@ impl PartitionReader {
             buf_reader.read_exact(&mut buf)?;
             for point in buf.chunks(16) {
                 let timestamp = u64::from_le_bytes(point[0..8].try_into().unwrap());
-                let value = i64::from_le_bytes(point[8..16].try_into().unwrap());
+                let value = f64::from_le_bytes(point[8..16].try_into().unwrap());
                 metrics.push(DataPoint::new(name.clone(), timestamp, value))
             }
 
@@ -344,7 +344,7 @@ mod test {
         let metric_name: Arc<str> = Arc::from(metric_name);
         data.insert(
             metric_name.clone(),
-            vec![DataPoint::new(metric_name.clone(), 100u64, 200i64)],
+            vec![DataPoint::new(metric_name.clone(), 100u64, 200f64)],
         );
         data
     }
@@ -355,7 +355,7 @@ mod test {
             data.insert(
                 metric_name.clone(),
                 (0..10)
-                    .map(|i| DataPoint::new(metric_name.clone(), 100u64 + i, 200i64 + i as i64))
+                    .map(|i| DataPoint::new(metric_name.clone(), 100u64 + i, 200f64 + i as f64))
                     .collect(),
             );
         });

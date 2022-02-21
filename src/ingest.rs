@@ -146,7 +146,7 @@ impl Engine {
     fn save_to_storage(&mut self, line_str: &str) {
         if let Some(line) = protocol::Line::parse(line_str.as_bytes()) {
             for (field_name, field_value) in line.fields_iter() {
-                if let Ok(int_value) = field_value.parse::<i64>() {
+                if let Ok(int_value) = field_value.parse::<f64>() {
                     let name = format!("{}:{}", line.timeseries_name(), field_name);
                     let rc_name = self
                         .metrics_cache
@@ -276,8 +276,8 @@ mod test {
             metrics
                 .iter()
                 .map(|m| (m.value, m.timestamp))
-                .collect::<Vec<(i64, u64)>>(),
-            vec![(0, 1465839830100400200), (2, 1465839830100400201)]
+                .collect::<Vec<(f64, u64)>>(),
+            vec![(0f64, 1465839830100400200), (2f64, 1465839830100400201)]
         );
         Ok(())
     }
@@ -306,8 +306,8 @@ mod test {
             metrics
                 .iter()
                 .map(|m| (m.value, m.timestamp))
-                .collect::<Vec<(i64, u64)>>(),
-            vec![(0, 1465839830100400200), (2, 1465839830100400201)]
+                .collect::<Vec<(f64, u64)>>(),
+            vec![(0f64, 1465839830100400200), (2f64, 1465839830100400201)]
         );
         Ok(())
     }
@@ -338,8 +338,8 @@ mod test {
             metrics
                 .iter()
                 .map(|m| (m.value, m.timestamp))
-                .collect::<Vec<(i64, u64)>>(),
-            vec![(0, 1465839830100400200)]
+                .collect::<Vec<(f64, u64)>>(),
+            vec![(0f64, 1465839830100400200)]
         );
         drop(metrics);
 
@@ -357,8 +357,8 @@ mod test {
             metrics
                 .iter()
                 .map(|m| (m.value, m.timestamp))
-                .collect::<Vec<(i64, u64)>>(),
-            vec![(0, 1465839830100400200), (4, 1465839830100400202)]
+                .collect::<Vec<(f64, u64)>>(),
+            vec![(0f64, 1465839830100400200), (4f64, 1465839830100400202)]
         );
         drop(metrics);
 

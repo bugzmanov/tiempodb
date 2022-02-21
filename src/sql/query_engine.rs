@@ -195,8 +195,8 @@ mod test {
         let snapshot = Arc::new(RwLock::new(HashMap::default()));
         let mut write = snapshot.write();
         (*write).add_bulk(&vec![
-            DataPoint::new(Arc::from("table1:metric1"), 100u64, 10i64),
-            DataPoint::new(Arc::from("table1:metric1"), 101u64, 12i64),
+            DataPoint::new(Arc::from("table1:metric1"), 100u64, 10f64),
+            DataPoint::new(Arc::from("table1:metric1"), 101u64, 12f64),
         ]);
 
         drop(write);
