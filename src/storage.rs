@@ -8,11 +8,20 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-struct FakeRc;
+pub struct FakeRc;
 
 impl Dummy<FakeRc> for Arc<str> {
     fn dummy_with_rng<R: Rng + ?Sized>(_: &FakeRc, rng: &mut R) -> Arc<str> {
         Arc::from(format!("timeseries_{}", rng.gen::<u32>()))
+    }
+}
+
+impl Dummy<FakeRc> for HashMap<String, String> {
+    fn dummy_with_rng<R: Rng + ?Sized>(_: &FakeRc, rng: &mut R) -> HashMap<String, String> {
+        let mut map = HashMap::default();
+        let idx = rng.gen::<u32>();
+        map.insert(format!("tagKey_{}", idx), format!("tagValue_{}", idx));
+        map
     }
 }
 
@@ -22,6 +31,8 @@ pub struct DataPoint {
     pub name: Arc<str>,
     pub timestamp: u64,
     pub value: f64,
+    #[dummy(faker = "FakeRc")]
+    pub tags: HashMap<String, String>,
 }
 
 impl DataPoint {
@@ -30,13 +41,36 @@ impl DataPoint {
             name,
             timestamp,
             value,
+            tags: HashMap::default(),
         }
+    }
+
+    pub fn new_with_tags(
+        name: Arc<str>,
+        timestamp: u64,
+        value: f64,
+        tags: &Vec<(&str, &str)>,
+    ) -> Self {
+        let mut data_point = DataPoint::new(name, timestamp, value);
+        data_point.set_tags(tags);
+        data_point
+    }
+
+    pub fn set_tags(&mut self, tags: &Vec<(&str, &str)>) {
+        let map: HashMap<String, String> = tags
+            .iter()
+            .map(|(x1, x2)| (x1.to_string(), x2.to_string()))
+            .collect();
+        self.tags = map;
     }
 }
 
 impl PartialEq for DataPoint {
     fn eq(&self, other: &DataPoint) -> bool {
-        self.name == other.name && self.timestamp == other.timestamp && self.value == other.value
+        self.name == other.name
+            && self.timestamp == other.timestamp
+            && self.value == other.value
+            && self.tags == other.tags
     }
 }
 

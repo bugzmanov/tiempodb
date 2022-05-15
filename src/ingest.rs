@@ -145,15 +145,18 @@ impl Engine {
 
     fn save_to_storage(&mut self, line_str: &str) {
         if let Some(line) = protocol::Line::parse(line_str.as_bytes()) {
+            let tags = line.tags();
+
             for (field_name, field_value) in line.fields_iter() {
                 if let Ok(int_value) = field_value.parse::<f64>() {
                     let name = format!("{}:{}", line.timeseries_name(), field_name);
                     let rc_name = self
                         .metrics_cache
-                        .entry(name.clone())
+                        .entry(name.clone()) //todo: clone?
                         .or_insert_with(|| Arc::from(name));
-                    let data_point =
+                    let mut data_point =
                         storage::DataPoint::new(rc_name.clone(), line.timestamp, int_value);
+                    data_point.set_tags(&tags);
                     self.storage.add(data_point);
                 } else {
                     log::error!("failed to parse {}", line_str);

@@ -52,6 +52,9 @@ Ideas:
 
 * O_DIRECT for wall log
 
+* Use smallvec or/and arrayvec crate
+* measure allocation rate using DHAT
+* use https://github.com/BurntSushi/bstr
 
 Refs:
 * replication:

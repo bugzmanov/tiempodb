@@ -163,6 +163,30 @@ impl PartitionReader {
     }
 }
 
+// struct TagsHelper {}
+
+// impl TagsHelper {
+//     pub fn read_tags(reader: io::BufReader<File>) -> anyhow::Result<HashMap<String, String>> {
+//         let mut tag_buf = [u8; 2];
+//         reader.read_exact(&mut tag_buf);
+//         let len = u16::from_le_bytes(tag_buf.try_into()?);
+
+//         let mut to_read = [u8; len as usize];
+//         reader.read_exact(&mut to_read);
+//         let tag_str = String::from_utf8(to_read)?;
+//         let result = HashMap::default();
+//         for tag in tag_str.split(";") {
+//             let split = tag.split("=")?;
+//             result.insert(split[0], split[1]);
+//         }
+//         result
+//     }
+
+//     pub fn write_tags(tags: HashMap<String, String>) {
+//         todo!()
+//     }
+// }
+
 pub struct PartitionManager {
     pub partitions_dir: PathBuf,
     pub last_partition_id: usize, //todo: overflows
@@ -332,12 +356,13 @@ impl PartitionManager {
 
 #[cfg(test)]
 mod test {
+    use super::*;
     use claim::assert_none;
     #[cfg(feature = "fail/failpoints")]
     use fail::{fail_point, FailScenario};
+    use fake::Faker;
+    use fake::{Dummy, Fake};
     use std::collections::{HashMap, HashSet};
-
-    use super::*;
 
     fn generate_metric(metric_name: &str) -> HashMap<Arc<str>, Vec<DataPoint>> {
         let mut data = HashMap::new();
@@ -355,7 +380,14 @@ mod test {
             data.insert(
                 metric_name.clone(),
                 (0..10)
-                    .map(|i| DataPoint::new(metric_name.clone(), 100u64 + i, 200f64 + i as f64))
+                    .map(|i| {
+                        DataPoint::new_with_tags(
+                            metric_name.clone(),
+                            100u64 + i,
+                            200f64 + i as f64,
+                            &vec![("tag", "value")],
+                        )
+                    })
                     .collect(),
             );
         });
@@ -465,6 +497,27 @@ mod test {
         assert_eq!(loaded_metrics, second_metrics);
 
         Ok(())
+    }
+
+    #[test]
+    #[cfg(not(feature = "fail/failpoints"))]
+    fn partition_reader_writer_are_in_sync() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let tmpfile = tempdir.path().join("file");
+        let mut metrics: HashMap<Arc<str>, Vec<DataPoint>> = HashMap::default();
+        for i in 0..5 {
+            let point = Faker.fake::<DataPoint>();
+            if let Some(vector) = metrics.get_mut(&point.name) {
+                vector.push(point);
+            } else {
+                metrics.insert(point.name.clone(), vec![point]);
+            }
+        }
+
+        let partition = PartitionWriter::write_partition(&tmpfile, &metrics).unwrap();
+
+        let result = PartitionReader::read_partition(&tmpfile, &partition).unwrap();
+        assert_eq!(metrics, result);
     }
 
     #[test]
